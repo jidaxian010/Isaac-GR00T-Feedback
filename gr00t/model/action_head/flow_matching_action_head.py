@@ -26,6 +26,7 @@ from gr00t.model.action_head.action_encoder import (
     SinusoidalPositionalEncoding,
     swish,
 )
+from gr00t.model.action_head.obs_encoder import ObsEncoder
 
 from .cross_attention_dit import DiT, SelfAttentionTransformer
 
@@ -54,6 +55,22 @@ class CategorySpecificMLP(nn.Module):
     def forward(self, x, cat_ids):
         hidden = F.relu(self.layer1(x, cat_ids))
         return self.layer2(hidden, cat_ids)
+
+# Encode state and obs together
+class StateObsMLP(nn.Module):
+    def __init__(self, num_categories, state_input_dim, emb_dim, output_dim):
+        super().__init__()
+        self.num_categories = num_categories
+        self.obs_layer = ObsEncoder(emb_dim) # defined in obs_encoder.py
+        self.state_layer = CategorySpecificLinear(num_categories, state_input_dim, emb_dim) # 
+        self.layer2 = CategorySpecificLinear(num_categories, emb_dim*2, output_dim)
+
+    def forward(self, state, obs, cat_ids):
+        obs_emb = self.obs_layer(obs)
+        state_emb = F.relu(self.state_layer(state))
+        x = torch.cat((state_emb, obs_emb), dim=1) # 
+
+        return self.layer2(x, cat_ids) # 1536
 
 
 class MultiEmbodimentActionEncoder(nn.Module):
@@ -185,6 +202,12 @@ class FlowmatchingActionHead(nn.Module):
             hidden_dim=self.hidden_size,
             output_dim=self.input_embedding_dim,
         )
+        self.state_obs_encoder = StateObsMLP(
+            num_categories=config.max_num_embodiments,
+            state_input_dim=config.max_state_dim, # 64
+            emb_dim=self.hidden_size / 2, # 1024 / 2 = 512
+            output_dim=self.input_embedding_dim, # fixed, 1536
+        )
         self.action_encoder = MultiEmbodimentActionEncoder(
             action_dim=config.action_dim,
             hidden_size=self.input_embedding_dim,
@@ -303,7 +326,8 @@ class FlowmatchingActionHead(nn.Module):
         embodiment_id = action_input.embodiment_id
 
         # Embed state.
-        state_features = self.state_encoder(action_input.state, embodiment_id)
+        # state_features = self.state_encoder(action_input.state, embodiment_id)
+        state_features = self.state_obs_encoder(action_input.state, action_input.simple_img, embodiment_id)
 
         # Embed noised action trajectory.
         actions = action_input.action

@@ -80,6 +80,12 @@ class GR00T_N1_5(PreTrainedModel):
 
         self.backbone = EagleBackbone(**config.backbone_cfg)
         action_head_cfg = FlowmatchingActionHeadConfig(**config.action_head_cfg)
+        # try overriding some data
+        action_head_cfg.max_num_embodiments = 1
+        action_head_cfg.action_horizon = 4
+        print(f"overriding max_num_embodiments: {action_head_cfg.max_num_embodiments}")
+        print(f"overriding action_horizon: {action_head_cfg.action_horizon}")
+        
         self.action_head = FlowmatchingActionHead(action_head_cfg)
 
         self.action_horizon = config.action_horizon
@@ -89,6 +95,9 @@ class GR00T_N1_5(PreTrainedModel):
     def validate_inputs(self, inputs):
         # NOTE -- this should be handled internally by the model
         # however, doing that will likely be breaking changes -- so we'll need to do it after the deadline
+        
+        # print(f"action_horizon: {self.action_horizon}")
+        # print(f"action_dim: {self.action_dim}")
 
         detected_error = False
         error_msg = ERROR_MSG
