@@ -48,7 +48,7 @@ class ArgsConfig:
     """Data configuration name from DATA_CONFIG_MAP, we assume all datasets have the same data config"""
 
     # Training parameters
-    batch_size: int = 32
+    batch_size: int = 16
     """Batch size per GPU for training."""
 
     max_steps: int = 10000
