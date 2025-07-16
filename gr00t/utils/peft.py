@@ -22,6 +22,10 @@ def get_lora_model(model, rank=32, lora_alpha=16, lora_dropout=0.1, action_head_
         if action_head_only and "action_head" not in name:
             continue
 
+        # Skip the new state_obs_encoder - let it be trained normally (not through LoRA)
+        if "state_obs_encoder" in name:
+            continue
+
         # Look for linear layers in attention mechanisms
         if isinstance(module, torch.nn.Linear):
             if any(x in name for x in ["q_proj", "v_proj", "to_q", "to_v", "k_proj", "to_k"]):

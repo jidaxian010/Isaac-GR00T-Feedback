@@ -28,6 +28,7 @@ from gr00t.model.action_head.action_encoder import (
 )
 from gr00t.model.action_head.obs_encoder import ObsEncoder
 
+
 from .cross_attention_dit import DiT, SelfAttentionTransformer
 
 
@@ -35,7 +36,6 @@ class CategorySpecificLinear(nn.Module):
     def __init__(self, num_categories, input_dim, hidden_dim):
         super().__init__()
         self.num_categories = num_categories
-        # For each category, we have separate weights and biases.
         self.W = nn.Parameter(0.02 * torch.randn(num_categories, input_dim, hidden_dim))
         self.b = nn.Parameter(torch.zeros(num_categories, hidden_dim))
 
@@ -56,22 +56,75 @@ class CategorySpecificMLP(nn.Module):
         hidden = F.relu(self.layer1(x, cat_ids))
         return self.layer2(hidden, cat_ids)
 
+# # Encode state and obs together
+# class StateObsMLP(nn.Module):
+#     def __init__(self, num_categories, state_input_dim, emb_dim, output_dim):
+#         super().__init__()
+#         self.num_categories = num_categories
+#         self.obs_layer = ObsEncoder(emb_dim) # defined in obs_encoder.py
+#         self.state_layer = CategorySpecificLinear(num_categories, state_input_dim, emb_dim) # 
+#         self.layer2 = CategorySpecificLinear(num_categories, emb_dim*2, output_dim)
+
+#     def forward(self, state, obs, cat_ids):
+#         obs_emb = self.obs_layer(obs)
+#         state_emb = F.relu(self.state_layer(state))
+#         x = torch.cat((state_emb, obs_emb), dim=1) # 
+
+#         return self.layer2(x, cat_ids) # 1536
+
 # Encode state and obs together
 class StateObsMLP(nn.Module):
     def __init__(self, num_categories, state_input_dim, emb_dim, output_dim):
         super().__init__()
         self.num_categories = num_categories
         self.obs_layer = ObsEncoder(emb_dim) # defined in obs_encoder.py
+        self.obs_layer_mlp = CategorySpecificLinear(num_categories, emb_dim, emb_dim)
         self.state_layer = CategorySpecificLinear(num_categories, state_input_dim, emb_dim) # 
         self.layer2 = CategorySpecificLinear(num_categories, emb_dim*2, output_dim)
+        
+        # Initialize weights properly for better training stability
+        self._init_weights()
+    
+    def _init_weights(self):
+        """Initialize weights for better training stability"""
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.xavier_uniform_(module.weight, gain=0.01)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
 
     def forward(self, state, obs, cat_ids):
-        obs_emb = self.obs_layer(obs)
-        state_emb = F.relu(self.state_layer(state))
-        x = torch.cat((state_emb, obs_emb), dim=1) # 
 
-        return self.layer2(x, cat_ids) # 1536
+        print("obs min/max/mean:", obs.min().item(), obs.max().item(), obs.float().mean().item())
+        obs_linear = (obs[:, -1, -1].float().view(obs.shape[0], -1)) / 255.0  # (B, 224*224*3)
+        obs_linear_512 = obs_linear[:, :512].unsqueeze(1)  # (B, 1, 512)
+        obs_emb = self.obs_layer_mlp(obs_linear_512, cat_ids)  # (B, 1, emb_dim)
+        # obs_emb = self.obs_layer(obs) # shape: (B, emb_dim) using cnn
 
+        print("obs_emb NaN?", torch.isnan(obs_emb).any().item())
+
+        state_emb = F.relu(self.state_layer(state, cat_ids))  # shape: (B, emb_dim)
+        print("state_emb NaN?", torch.isnan(state_emb).any().item())
+
+        x = torch.cat((state_emb, obs_emb), dim=2) # shape: (B, 1, 1024)
+        print("x NaN?", torch.isnan(x).any().item())
+
+        output = self.layer2(x, cat_ids) # 1536
+        print("output NaN?", torch.isnan(output).any().item())
+        return output
+
+
+# Encode state and obs together
+class StateObsMLP_test(nn.Module):
+    def __init__(self, num_categories, state_input_dim, output_dim):
+        super().__init__()
+        self.num_categories = num_categories
+        self.layer1 = CategorySpecificLinear(num_categories, state_input_dim, output_dim)
+        
+    def forward(self, state, cat_ids):
+        x = F.relu(self.layer1(state, cat_ids))
+
+        return x # 1536
 
 class MultiEmbodimentActionEncoder(nn.Module):
     def __init__(self, action_dim, hidden_size, num_embodiments):
@@ -205,7 +258,12 @@ class FlowmatchingActionHead(nn.Module):
         self.state_obs_encoder = StateObsMLP(
             num_categories=config.max_num_embodiments,
             state_input_dim=config.max_state_dim, # 64
-            emb_dim=self.hidden_size / 2, # 1024 / 2 = 512
+            emb_dim=self.hidden_size // 2, # 1024 / 2 = 512
+            output_dim=self.input_embedding_dim, # fixed, 1536
+        )
+        self.state_obs_encoder_test = StateObsMLP_test(
+            num_categories=config.max_num_embodiments,
+            state_input_dim=config.max_state_dim, # 64
             output_dim=self.input_embedding_dim, # fixed, 1536
         )
         self.action_encoder = MultiEmbodimentActionEncoder(
@@ -253,8 +311,13 @@ class FlowmatchingActionHead(nn.Module):
                 self.position_embedding.requires_grad_(False)
         if not tune_diffusion_model:
             self.model.requires_grad_(False)
+        
+        # Always ensure the new state_obs_encoder is trainable (not affected by tune_projector)
+        self.state_obs_encoder.requires_grad_(True)
+        
         print(f"Tune action head projector: {self.tune_projector}")
         print(f"Tune action head diffusion model: {self.tune_diffusion_model}")
+        print("New state_obs_encoder is always trainable (not through LoRA)")
         # Check if any parameters are still trainable. If not, print a warning.
         if not tune_projector and not tune_diffusion_model:
             for name, p in self.named_parameters():
@@ -325,9 +388,10 @@ class FlowmatchingActionHead(nn.Module):
         # Get embodiment ID.
         embodiment_id = action_input.embodiment_id
 
-        # Embed state.
+        ## Embed state.
         # state_features = self.state_encoder(action_input.state, embodiment_id)
         state_features = self.state_obs_encoder(action_input.state, action_input.simple_img, embodiment_id)
+        # state_features = self.state_obs_encoder_test(action_input.state, embodiment_id) # for debugging
 
         # Embed noised action trajectory.
         actions = action_input.action
@@ -366,6 +430,13 @@ class FlowmatchingActionHead(nn.Module):
 
         # Slice out only the action portion of pred and target.
         action_mask = action_input.action_mask
+
+
+        # print("pred_actions:", pred_actions)
+        # print("velocity:", velocity)
+        # print("action_mask:", action_mask)
+        # print("loss (before reduction):", F.mse_loss(pred_actions, velocity, reduction="none"))
+
         loss = F.mse_loss(pred_actions, velocity, reduction="none") * action_mask
         loss = loss.sum() / action_mask.sum()
         output_dict = {
