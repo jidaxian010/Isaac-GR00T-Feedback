@@ -201,11 +201,20 @@ class PolicyEvaluator:
         
         print(f"\n=== Running inference for {self.num_episodes} episodes ===")
         
+        # # run at every steps (wrong, just for test):
+        # for i in range(self.num_episodes):
+        #     step_data = self.dataset[i]
+        #     gt_all_actions = step_data["action.all_actions"]
+        #     predicted_all_actions = self.policy.get_action(step_data)["action.all_actions"]
+
+        #     gt_all_actions_list.append(gt_all_actions[0])
+        #     predicted_action_chunk_list.append(predicted_all_actions[0])
+        #     joint_states_list.append(step_data["state.joint_states"][0])
+
         for time_step in range(self.num_episodes):   # 132 is the number of steps in the dataset for the first task
             # Inference at each timestep
             step_data = self.dataset[time_step]
             gt_all_actions = step_data["action.all_actions"]
-            predicted_all_actions = self.policy.get_action(step_data)["action.all_actions"]
 
             gt_all_actions_list.append(gt_all_actions[0])
             # predicted_all_actions_list.append(predicted_all_actions[0])
@@ -215,7 +224,7 @@ class PolicyEvaluator:
             # Inference at every 16 steps
             if time_step % action_horizon == 0:
                 print(f"\n--- Inference at step: {time_step} ---")
-                action_chunk = self.policy.get_action(step_data, print_timing=True)["action.all_actions"]
+                action_chunk = self.policy.get_action(step_data, time_step, select_model_fast=False, print_timing=True)["action.all_actions"]
                 print("ACTION CHUNK SHAPE",action_chunk.shape)
                 
                 if action_chunk.shape[0] != action_horizon:
@@ -274,103 +283,98 @@ class PolicyEvaluator:
         plt.tight_layout()
         plt.show()
 
-    # def compare_results_libero_fast(self):
-    #     """
-    #     Compare the predicted action with the ground truth action.
-    #     Creates subplots for each joint (5 arm joints + 1 gripper).
-    #     """
-    #     action_horizon = self.action_horizon
-    #     gt_all_actions_list = []
-    #     # predicted_all_actions_list = []
-    #     predicted_action_chunk_list = []
-    #     joint_states_list = []
+    def compare_results_libero_fast(self):
+        """
+        Compare the predicted action with the ground truth action using fast inference.
+        Only runs backbone at timesteps 0, 16, 32, etc., reuses backbone outputs for other timesteps.
+        """
+        action_horizon = self.action_horizon
+        gt_all_actions_list = []
+        predicted_action_chunk_list = []
+        joint_states_list = []
         
-    #     # Lists to store timing data
-    #     backbone_times = []
-    #     action_head_times = []
-    #     total_times = []
+        # Lists to store timing data
+        backbone_times = []
+        action_head_times = []
+        total_times = []
         
-    #     print(f"\n=== Running inference for {self.num_episodes} episodes ===")
+        print(f"\n=== Running fast inference for {self.num_episodes} episodes ===")
         
-    #     for time_step in range(self.num_episodes):   # 132 is the number of steps in the dataset for the first task
-    #         # Inference at each timestep
-    #         step_data = self.dataset[time_step]
-    #         gt_all_actions = step_data["action.all_actions"]
-    #         predicted_all_actions = self.policy.get_action(step_data)["action.all_actions"]
-
-    #         gt_all_actions_list.append(gt_all_actions[0])
-    #         # predicted_all_actions_list.append(predicted_all_actions[0])
-    #         joint_states_list.append(step_data["state.joint_states"][0])
+        for time_step in range(self.num_episodes):
+            # Get ground truth for comparison
+            step_data = self.dataset[time_step]
+            gt_all_actions = step_data["action.all_actions"]
+            gt_all_actions_list.append(gt_all_actions[0])
+            joint_states_list.append(step_data["state.joint_states"][0])
             
-    #         action_chunk = self.policy.get_action_fast(step_data, time_step, print_timing=True)["action.all_actions"]
+            # Run fast inference (backbone only at action_horizon steps)
+            action_chunk = self.policy.get_action(step_data, time_step, select_model_fast=True, print_timing=True)["action.all_actions"]
             
-    #         # Inference at every 16 steps
-    #         if time_step % action_horizon == 0:
-    #             print(f"\n--- Inference at step: {time_step} ---")
-    #             action_chunk = self.policy.get_action(step_data, print_timing=True)["action.all_actions"]
-    #             print("ACTION CHUNK SHAPE",action_chunk.shape)
+            if action_chunk.shape[0] != action_horizon:
+                raise ValueError(f"Action chunk shape {action_chunk.shape[0]} does not match expected action horizon {action_horizon}")
+            
+            predicted_action_chunk_list.append(action_chunk[0])
+            
+            # Get timing stats if this was a full inference (backbone + action_head)
+            if time_step % action_horizon == 0:
+                timing_stats = self.policy.get_last_timing_stats()
+                backbone_times.append(timing_stats.get('backbone_inference_time', 0))
+                action_head_times.append(timing_stats.get('action_head_inference_time', 0))
+                total_times.append(timing_stats.get('total_inference_time', 0))
+
+
+
+   
                 
-    #             if action_chunk.shape[0] != action_horizon:
-    #                 raise ValueError(f"Action chunk shape {action_chunk.shape[0]} does not match expected action horizon {action_horizon}")
-
-    #             # Get timing stats for this inference
-    #             timing_stats = self.policy.get_last_timing_stats()
-    #             backbone_times.append(timing_stats.get('backbone_inference_time', 0))
-    #             action_head_times.append(timing_stats.get('action_head_inference_time', 0))
-    #             total_times.append(timing_stats.get('total_inference_time', 0))
                 
-    #             for j in range(action_horizon):
-    #                 predicted_action = action_chunk[j]
-    #                 predicted_action_chunk_list.append(predicted_action)
+        # Print timing summary
+        print(f"\n{'='*50}")
+        print(f"TIMING SUMMARY")
+        print(f"{'='*50}")
+        print(f"Number of inference calls: {len(backbone_times)}")
+        print(f"Denoising steps: {self.policy.denoising_steps}")
+        print(f"Action horizon: {self.action_horizon}")
+        print(f"Average VLM (backbone) time: {np.mean(backbone_times):.4f} ± {np.std(backbone_times):.4f} seconds")
+        print(f"Average DiT (action head) time: {np.mean(action_head_times):.4f} ± {np.std(action_head_times):.4f} seconds")
+        print(f"Average total inference time: {np.mean(total_times):.4f} ± {np.std(total_times):.4f} seconds")
+        print(f"Min total time: {np.min(total_times):.4f} seconds")
+        print(f"Max total time: {np.max(total_times):.4f} seconds")
+        print(f"{'='*50}")
 
-    #     # Print timing summary
-    #     print(f"\n{'='*50}")
-    #     print(f"TIMING SUMMARY")
-    #     print(f"{'='*50}")
-    #     print(f"Number of inference calls: {len(backbone_times)}")
-    #     print(f"Denoising steps: {self.policy.denoising_steps}")
-    #     print(f"Action horizon: {self.action_horizon}")
-    #     print(f"Average VLM (backbone) time: {np.mean(backbone_times):.4f} ± {np.std(backbone_times):.4f} seconds")
-    #     print(f"Average DiT (action head) time: {np.mean(action_head_times):.4f} ± {np.std(action_head_times):.4f} seconds")
-    #     print(f"Average total inference time: {np.mean(total_times):.4f} ± {np.std(total_times):.4f} seconds")
-    #     print(f"Min total time: {np.min(total_times):.4f} seconds")
-    #     print(f"Max total time: {np.max(total_times):.4f} seconds")
-    #     print(f"{'='*50}")
+        # Convert lists to numpy arrays
+        gt_all_actions_array = np.array(gt_all_actions_list)
+        # predicted_all_actions_array = np.array(predicted_all_actions_list)
+        joint_states_array = np.array(joint_states_list)
+        predicted_action_chunk_array = np.array(predicted_action_chunk_list)
+        # print
+        print("its the action shape",gt_all_actions_array.shape)
+        print("its the state shape",joint_states_array.shape)
+        print("its the predicted action chunk shape",predicted_action_chunk_array.shape)
+        # Create subplots for each joint
+        joint_names = ['Joint 1', 'Joint 2', 'Joint 3', 'Joint 4', 'Joint 5', 'Joint 6', 'Joint 7']
+        fig, axs = plt.subplots(4, 2, figsize=(15, 15))
+        axs = axs.flatten()
 
-    #     # Convert lists to numpy arrays
-    #     gt_all_actions_array = np.array(gt_all_actions_list)
-    #     # predicted_all_actions_array = np.array(predicted_all_actions_list)
-    #     joint_states_array = np.array(joint_states_list)
-    #     predicted_action_chunk_array = np.array(predicted_action_chunk_list)
-    #     # print
-    #     print("its the action shape",gt_all_actions_array.shape)
-    #     print("its the state shape",joint_states_array.shape)
-    #     print("its the predicted action chunk shape",predicted_action_chunk_array.shape)
-    #     # Create subplots for each joint
-    #     joint_names = ['Joint 1', 'Joint 2', 'Joint 3', 'Joint 4', 'Joint 5', 'Joint 6', 'Joint 7']
-    #     fig, axs = plt.subplots(4, 2, figsize=(15, 15))
-    #     axs = axs.flatten()
+        # Plot arm joints
+        for i in range(7):
+            axs[i].plot(gt_all_actions_array[:, i], label='Ground Truth', color='blue')
+            # axs[i].plot(predicted_all_actions_array[:, i], label='Predicted', color='red', linestyle='--')
+            axs[i].plot(joint_states_array[:, i], label='Joint States', color='green')
+            axs[i].plot(predicted_action_chunk_array[:, i], label='Predicted Action Chunk', color='black', linestyle='--')
+            axs[i].set_title(f'{joint_names[i]}')
+            axs[i].set_xlabel('Time Step')
+            axs[i].set_ylabel('Joint Value')
+            axs[i].legend()
+            axs[i].grid(True)
 
-    #     # Plot arm joints
-    #     for i in range(7):
-    #         axs[i].plot(gt_all_actions_array[:, i], label='Ground Truth', color='blue')
-    #         # axs[i].plot(predicted_all_actions_array[:, i], label='Predicted', color='red', linestyle='--')
-    #         axs[i].plot(joint_states_array[:, i], label='Joint States', color='green')
-    #         axs[i].plot(predicted_action_chunk_array[:, i], label='Predicted Action Chunk', color='black', linestyle='--')
-    #         axs[i].set_title(f'{joint_names[i]}')
-    #         axs[i].set_xlabel('Time Step')
-    #         axs[i].set_ylabel('Joint Value')
-    #         axs[i].legend()
-    #         axs[i].grid(True)
-
-    #     plt.tight_layout()
-    #     plt.show()
+        plt.tight_layout()
+        plt.show()
 
     
 
     # def get_action(self, step_idx: int = 0):
     #     """
-    #     Get the predicted action for a specific step.
+    #     For timing evaluation only
 
     #     Args:
     #         step_idx (int): Index of the step to get action for (default: 0)
@@ -461,8 +465,10 @@ def main():
     # print("\n=== Single Inference with Timing ===")
     # evaluator.get_action()
     
-    # Run comparison with timing for multiple inferences:
-    evaluator.compare_results_libero()  # This will show timing for each inference call
+
+    
+    # evaluator.compare_results_libero()  # This will show timing for each inference call
+    evaluator.compare_results_libero_fast()  # This will reuse backbone outputs
     
     
     # evaluator.compare_results_so100()

@@ -182,7 +182,7 @@ class GR00T_N1(PreTrainedModel):
         inputs: dict,
     ) -> BatchFeature:
         backbone_inputs, action_inputs = self.prepare_input(inputs)
-        
+        print("Run Original VLM+DiT Model")
         # Time the backbone (VLM) inference with proper GPU synchronization
         torch.cuda.synchronize()
         backbone_start_time = time.time()
@@ -208,23 +208,58 @@ class GR00T_N1(PreTrainedModel):
         return action_head_outputs
     
 
-    # def get_action_fast(
-    #     self,
-    #     inputs: dict,
-    #     time_step: int,
-    # ) -> BatchFeature:
-    #     backbone_inputs, action_inputs = self.prepare_input(inputs)
-        
-    #     if time_step % self.action_horizon == 0:
-    #         backbone_outputs = self.backbone(backbone_inputs)
-    #         action_head_outputs = self.action_head.get_action(backbone_outputs, action_inputs)
-    #         self.validate_data(action_head_outputs, backbone_outputs, is_training=False)
-    #         return action_head_outputs
-    #     else:
+    def get_action_fast(
+        self,
+        inputs: dict,
+        time_step: int,
+    ) -> BatchFeature:
+        backbone_inputs, action_inputs = self.prepare_input(inputs)
+        print("Run Fast Model")
+        if time_step % 16 == 0:
+            # Run both backbone and action_head
+            print(f"hey, im at {time_step}")
+            print("im at 320")
+            torch.cuda.synchronize()
+            backbone_start_time = time.time()
+            backbone_outputs = self.backbone(backbone_inputs)
+            torch.cuda.synchronize()
+            backbone_end_time = time.time()
+            backbone_inference_time = backbone_end_time - backbone_start_time
+
+            self._cached_backbone_outputs = backbone_outputs
+
+            torch.cuda.synchronize()
+            action_head_start_time = time.time()
+            action_head_outputs = self.action_head.get_action(backbone_outputs, action_inputs)
+            torch.cuda.synchronize()
+            action_head_end_time = time.time()
+            action_head_inference_time = action_head_end_time - action_head_start_time
+
+            action_head_outputs["backbone_inference_time"] = backbone_inference_time
+            action_head_outputs["action_head_inference_time"] = action_head_inference_time
+            action_head_outputs["total_inference_time"] = backbone_inference_time + action_head_inference_time
+
+            self.validate_data(action_head_outputs, backbone_outputs, is_training=False)
+            return action_head_outputs
+        else:
+            print(f"hey, im at {time_step}") 
+            # Reuse cached backbone outputs, only run action_head
+            if not hasattr(self, '_cached_backbone_outputs'):
+                raise ValueError(f"No cached backbone outputs available at timestep {time_step}")
             
-    #         action_head_outputs = self.action_head.get_action(backbone_outputs, action_inputs)
-    #         self.validate_data(action_head_outputs, backbone_outputs, is_training=False)
-    #         return action_head_outputs
+            torch.cuda.synchronize()
+            action_head_start_time = time.time()
+            action_head_outputs = self.action_head.get_action(self._cached_backbone_outputs, action_inputs)
+            torch.cuda.synchronize()
+            action_head_end_time = time.time()
+            action_head_inference_time = action_head_end_time - action_head_start_time
+
+            action_head_outputs["backbone_inference_time"] = 0.0
+            action_head_outputs["action_head_inference_time"] = action_head_inference_time
+            action_head_outputs["total_inference_time"] = action_head_inference_time
+
+            self.validate_data(action_head_outputs, self._cached_backbone_outputs, is_training=False)
+            return action_head_outputs
             
             
 
@@ -403,7 +438,7 @@ class SplitPolicy(BasePolicy):
         """
         return self._modality_transform.unapply(action)
 
-    def get_action(self, observations: Dict[str, Any], print_timing: bool = False) -> Dict[str, Any]:
+    def get_action(self, observations: Dict[str, Any], time_step: int, select_model_fast: bool = False, print_timing: bool = False) -> Dict[str, Any]:
         """
         Make a prediction with the model.
         Args:
@@ -432,7 +467,7 @@ class SplitPolicy(BasePolicy):
         # Apply transforms
         normalized_input = self.apply_transforms(observations)
 
-        normalized_action = self._get_action_from_normalized_input(normalized_input)
+        normalized_action = self._get_action_from_normalized_input(normalized_input, time_step, select_model_fast)
         unnormalized_action = self._get_unnormalized_action(normalized_action)
 
         if not is_batch:
@@ -444,10 +479,14 @@ class SplitPolicy(BasePolicy):
             
         return unnormalized_action
 
-    def _get_action_from_normalized_input(self, normalized_input: Dict[str, Any]) -> torch.Tensor:
+    def _get_action_from_normalized_input(self, normalized_input: Dict[str, Any], time_step: int, select_model_fast: bool = False) -> torch.Tensor:
         # Set up autocast context if needed
-        with torch.inference_mode(), torch.autocast(device_type="cuda", dtype=COMPUTE_DTYPE):
-            model_pred = self.model.get_action(normalized_input)
+        if select_model_fast:
+            with torch.inference_mode(), torch.autocast(device_type="cuda", dtype=COMPUTE_DTYPE):
+                model_pred = self.model.get_action_fast(normalized_input, time_step)
+        else:
+            with torch.inference_mode(), torch.autocast(device_type="cuda", dtype=COMPUTE_DTYPE):
+                model_pred = self.model.get_action(normalized_input)
 
         # Store timing information for later access
         self._last_model_output = model_pred
