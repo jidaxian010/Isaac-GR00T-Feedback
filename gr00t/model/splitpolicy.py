@@ -170,12 +170,45 @@ class GR00T_N1(PreTrainedModel):
     def forward(
         self,
         inputs: dict,
+        window_idx: int = None,
     ) -> BatchFeature:
+        """
+        For training that matches the fast inference architecture.
+        Only run the VLM backbone every 4th window (window_idx % 4 == 0),
+        and cache/reuse the VLM output for intermediate windows.
+        If window_idx is None, always run the backbone (backward compatible).
+        """
         backbone_inputs, action_inputs = self.prepare_input(inputs)
-        backbone_outputs = self.backbone(backbone_inputs)
+        
+        if window_idx is None:
+            # Always run backbone if no window index is provided
+            print("Training: No window_idx provided, running VLM backbone")
+            backbone_outputs = self.backbone(backbone_inputs)
+            action_head_outputs = self.action_head(backbone_outputs, action_inputs)
+            self.validate_data(action_head_outputs, backbone_outputs, is_training=True)
+            return action_head_outputs
+        
+        if window_idx % 4 == 0:
+            # Run VLM backbone and cache output
+            print(f"Training: window_idx={window_idx} (VLM RUNNING)")
+            backbone_outputs = self.backbone(backbone_inputs)
+            self._cached_backbone_outputs = backbone_outputs
+        else:
+            # Use cached VLM output
+            if not hasattr(self, '_cached_backbone_outputs'):
+                # If no cache, run VLM anyway
+                print(f"Training: window_idx={window_idx} (NO CACHE, running VLM)")
+                backbone_outputs = self.backbone(backbone_inputs)
+                self._cached_backbone_outputs = backbone_outputs
+            else:
+                print(f"Training: window_idx={window_idx} (USING CACHED VLM)")
+                backbone_outputs = self._cached_backbone_outputs
+        
         action_head_outputs = self.action_head(backbone_outputs, action_inputs)
         self.validate_data(action_head_outputs, backbone_outputs, is_training=True)
         return action_head_outputs
+
+
 
     def get_action(
         self,
@@ -215,10 +248,10 @@ class GR00T_N1(PreTrainedModel):
     ) -> BatchFeature:
         backbone_inputs, action_inputs = self.prepare_input(inputs)
         print("Run Fast Model")
-        if time_step % 16 == 0:
+        if time_step % 2 == 0:
             # Run both backbone and action_head
             print(f"hey, im at {time_step}")
-            print("im at 320")
+            print("320 320 320")
             torch.cuda.synchronize()
             backbone_start_time = time.time()
             backbone_outputs = self.backbone(backbone_inputs)

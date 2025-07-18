@@ -66,13 +66,27 @@ class DualBrainTrainer(transformers.Trainer):
         super().__init__(**kwargs)
 
     def _get_train_sampler(self):
+        # Reset window_idx at the start of each epoch
+        if hasattr(self, '_window_idx'):
+            print(f"Starting new epoch, resetting window_idx from {self._window_idx} to 0")
+            self._window_idx = 0
         return BaseSampler(self.train_dataset, shuffle=True, seed=self.args.seed)
 
     def _get_eval_sampler(self, eval_dataset):
         return BaseSampler(eval_dataset, shuffle=False)
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
-        outputs = model(inputs)
+        # You need to define how to get window_idx for each batch
+        # For example, keep a counter as an attribute of the trainer
+        if not hasattr(self, '_window_idx'):
+            self._window_idx = 0
+        
+        # Print every 100 batches to monitor training progress
+        if self._window_idx % 100 == 0:
+            print(f"Training batch {self._window_idx}: window_idx={self._window_idx}, VLM will run: {self._window_idx % 4 == 0}")
+        
+        outputs = model(inputs, window_idx=self._window_idx)
+        self._window_idx += 1
         loss = outputs["loss"]
         return (loss, outputs) if return_outputs else loss
 
