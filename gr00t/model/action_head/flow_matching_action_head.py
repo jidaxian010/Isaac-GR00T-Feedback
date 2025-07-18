@@ -95,22 +95,15 @@ class StateObsMLP(nn.Module):
 
     def forward(self, state, obs, cat_ids):
 
-        print("obs min/max/mean:", obs.min().item(), obs.max().item(), obs.float().mean().item())
         obs_linear = (obs[:, -1, -1].float().view(obs.shape[0], -1)) / 255.0  # (B, 224*224*3)
         obs_linear_512 = obs_linear[:, :512].unsqueeze(1)  # (B, 1, 512)
         obs_emb = self.obs_layer_mlp(obs_linear_512, cat_ids)  # (B, 1, emb_dim)
         # obs_emb = self.obs_layer(obs) # shape: (B, emb_dim) using cnn
 
-        print("obs_emb NaN?", torch.isnan(obs_emb).any().item())
-
         state_emb = F.relu(self.state_layer(state, cat_ids))  # shape: (B, emb_dim)
-        print("state_emb NaN?", torch.isnan(state_emb).any().item())
-
         x = torch.cat((state_emb, obs_emb), dim=2) # shape: (B, 1, 1024)
-        print("x NaN?", torch.isnan(x).any().item())
 
         output = self.layer2(x, cat_ids) # 1536
-        print("output NaN?", torch.isnan(output).any().item())
         return output
 
 
@@ -389,9 +382,8 @@ class FlowmatchingActionHead(nn.Module):
         embodiment_id = action_input.embodiment_id
 
         ## Embed state.
-        # state_features = self.state_encoder(action_input.state, embodiment_id)
+        # state_features = self.state_encoder(action_input.state, embodiment_id) # old encoder
         state_features = self.state_obs_encoder(action_input.state, action_input.simple_img, embodiment_id)
-        # state_features = self.state_obs_encoder_test(action_input.state, embodiment_id) # for debugging
 
         # Embed noised action trajectory.
         actions = action_input.action
