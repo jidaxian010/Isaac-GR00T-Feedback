@@ -76,17 +76,20 @@ class DualBrainTrainer(transformers.Trainer):
         return BaseSampler(eval_dataset, shuffle=False)
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
-        # You need to define how to get window_idx for each batch
-        # For example, keep a counter as an attribute of the trainer
+
+        # # original compute loss
+        # outputs = model(inputs)
+
         if not hasattr(self, '_window_idx'):
             self._window_idx = 0
-        
-        # Print every 100 batches to monitor training progress
-        if self._window_idx % 100 == 0:
-            print(f"Training batch {self._window_idx}: window_idx={self._window_idx}, VLM will run: {self._window_idx % 4 == 0}")
-        
+            print(f"Starting new epoch, resetting window_idx from {self._window_idx} to 0")
+        # # Print every 100 batches to monitor training progress
+        # if self._window_idx % 100 == 0:
+        #     print(f"Training batch {self._window_idx}: window_idx={self._window_idx}, VLM will run: {self._window_idx % 4 == 0}")
         outputs = model(inputs, window_idx=self._window_idx)
         self._window_idx += 1
+        # print(f"window_idx: {self._window_idx}")
+
         loss = outputs["loss"]
         return (loss, outputs) if return_outputs else loss
 

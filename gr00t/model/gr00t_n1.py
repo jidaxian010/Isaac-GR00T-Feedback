@@ -14,8 +14,8 @@
 # limitations under the License.
 
 from dataclasses import dataclass, field
-from typing import Tuple
-
+from typing import Tuple, Any
+import copy
 import numpy as np
 import torch
 import tree
@@ -166,16 +166,113 @@ class GR00T_N1_5(PreTrainedModel):
             error_msg += f"\n{self.action_horizon=}"
             error_msg += f"\n{self.action_dim=}"
             raise ValueError(error_msg)
+    
+    # TODO: when reuse vlm values, it's passed into backward progress again. Try to Detach
 
-    def forward(
-        self,
-        inputs: dict,
-    ) -> BatchFeature:
+    # def forward(
+    #     self,
+    #     inputs: dict,
+    #     window_idx: int = None,
+    # ) -> BatchFeature:
+    #     backbone_inputs, action_inputs = self.prepare_input(inputs)
+    #     backbone_outputs = self.backbone(backbone_inputs)
+    #     action_head_outputs = self.action_head(backbone_outputs, action_inputs)
+    #     self.validate_data(action_head_outputs, backbone_outputs, is_training=True)
+    #     return action_head_outputs
+
+    # def forward(
+    #     self,
+    #     inputs: dict,
+    #     window_idx: int = None,
+    # ) -> BatchFeature:
+    #     """
+    #     For training that matches the fast inference architecture.
+    #     Only run the VLM backbone every 4th window (window_idx % 4 == 0),
+    #     and cache/reuse the VLM output for intermediate windows.
+    #     If window_idx is None, always run the backbone (backward compatible).
+    #     """
+    #     backbone_inputs, action_inputs = self.prepare_input(inputs)
+        
+    #     if window_idx is None:
+    #         # Always run backbone if no window index is provided
+    #         print("Training: No window_idx provided, running VLM backbone")
+    #         backbone_outputs = self.backbone(backbone_inputs)
+    #         action_head_outputs = self.action_head(backbone_outputs, action_inputs)
+    #         self.validate_data(action_head_outputs, backbone_outputs, is_training=True)
+    #         return action_head_outputs
+        
+    #     if window_idx % 4 == 0:
+    #         for name, tensor in backbone_inputs.items():
+    #             print(f"{name}: grad_fn = {tensor.grad_fn}, requires_grad = {tensor.requires_grad}")
+
+    #         # Run VLM backbone and cache output
+    #         print(f"Training: window_idx={window_idx} (VLM RUNNING)")
+    #         backbone_outputs_fresh = self.backbone(backbone_inputs)
+    #         # Create completely independent copies of the outputs
+    #         detached_data = {}
+    #         for k, v in backbone_outputs_fresh.items():
+    #             if torch.is_tensor(v):
+    #                 detached_data[k] = v.clone().detach()
+    #             else:
+    #                 detached_data[k] = v
+    #         self._cached_backbone_outputs = type(backbone_outputs_fresh)(data=detached_data)
+    #         backbone_outputs = self._cached_backbone_outputs
+    #     else:
+    #         print(f"Training: window_idx={window_idx} (USING CACHED VLM)")
+    #         backbone_outputs = self._cached_backbone_outputs
+        
+    #     action_head_outputs = self.action_head(backbone_outputs, action_inputs)
+    #     self.validate_data(action_head_outputs, backbone_outputs, is_training=True)
+    #     return action_head_outputs
+
+
+    def forward(self, inputs: dict, window_idx: int = None) -> BatchFeature:
         backbone_inputs, action_inputs = self.prepare_input(inputs)
-        backbone_outputs = self.backbone(backbone_inputs)
+        if window_idx is None or window_idx % 4 == 0:
+            # print(f"Training: window_idx={window_idx} (VLM RUNNING)")
+            fresh = self.backbone(backbone_inputs)
+            self._cached_backbone_outputs = self._detach_batchfeature(fresh)
+            backbone_outputs = self._cached_backbone_outputs
+            backbone_outputs["backbone_features"] = backbone_outputs["backbone_features"].clone().detach()
+        else:
+            # print(f"Training: window_idx={window_idx} (USING CACHED VLM)")
+            backbone_outputs = self._cached_backbone_outputs
+            backbone_outputs["backbone_features"] = backbone_outputs["backbone_features"].clone().detach()
+            
+            # # Debug: check detachment
+            # for name, tensor in self._cached_backbone_outputs.items():
+            #     if torch.is_tensor(tensor):
+            #         print(
+            #             f"[DETACH DEBUG backbone] {name}: requires_grad={tensor.requires_grad}, grad_fn={tensor.grad_fn}"
+            #         )
+
         action_head_outputs = self.action_head(backbone_outputs, action_inputs)
         self.validate_data(action_head_outputs, backbone_outputs, is_training=True)
         return action_head_outputs
+
+    def _detach_batchfeature(self, bf):
+        """
+        Return a copy of bf where *every* tensor in bf.data
+        has been cloned, detached, and set requires_grad=False.
+        We do this by shallow-copying bf and then replacing its .data.
+        """
+        # 1) Build a new dict of detached tensors
+        detached_data = {}
+        for k, v in bf.data.items():
+            if torch.is_tensor(v):
+                # clone so we don’t share storage, detach from any graph,
+                # and prevent any future grad requests
+                detached_data[k] = v.clone().detach().requires_grad_(False)
+            else:
+                detached_data[k] = v
+
+        # 2) Shallow-copy the original BatchFeature object
+        new_bf = copy.copy(bf)
+        # 3) Overwrite its .data with our detached copy
+        new_bf.data = detached_data
+        return new_bf
+
+
 
     def get_action(
         self,
