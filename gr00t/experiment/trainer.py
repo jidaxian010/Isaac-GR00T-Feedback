@@ -19,7 +19,7 @@ from typing import Optional
 
 import torch
 import transformers
-from torch.utils.data import Dataset, Sampler
+from torch.utils.data import Dataset, Sampler, DataLoader
 from transformers.trainer import (
     ALL_LAYERNORM_LAYERS,
     TRAINER_STATE_NAME,
@@ -143,6 +143,23 @@ class DualBrainTrainer(transformers.Trainer):
 
         if self.args.should_save:
             return self.model.save_pretrained(output_dir, state_dict=state_dict)
+
+    def get_train_dataloader(self):
+        """
+        Returns the training DataLoader with drop_last=True.
+        """
+        train_dataset = self.train_dataset
+        data_collator = self.data_collator
+        train_sampler = self._get_train_sampler()
+        return DataLoader(
+            train_dataset,
+            batch_size=self.args.train_batch_size,
+            sampler=train_sampler,
+            collate_fn=data_collator,
+            drop_last=True,  # Ensures the last small batch is dropped
+            num_workers=self.args.dataloader_num_workers,
+            pin_memory=self.args.dataloader_pin_memory,
+        )
 
     def train(
         self,

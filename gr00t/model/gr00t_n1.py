@@ -180,51 +180,6 @@ class GR00T_N1_5(PreTrainedModel):
     #     self.validate_data(action_head_outputs, backbone_outputs, is_training=True)
     #     return action_head_outputs
 
-    # def forward(
-    #     self,
-    #     inputs: dict,
-    #     window_idx: int = None,
-    # ) -> BatchFeature:
-    #     """
-    #     For training that matches the fast inference architecture.
-    #     Only run the VLM backbone every 4th window (window_idx % 4 == 0),
-    #     and cache/reuse the VLM output for intermediate windows.
-    #     If window_idx is None, always run the backbone (backward compatible).
-    #     """
-    #     backbone_inputs, action_inputs = self.prepare_input(inputs)
-        
-    #     if window_idx is None:
-    #         # Always run backbone if no window index is provided
-    #         print("Training: No window_idx provided, running VLM backbone")
-    #         backbone_outputs = self.backbone(backbone_inputs)
-    #         action_head_outputs = self.action_head(backbone_outputs, action_inputs)
-    #         self.validate_data(action_head_outputs, backbone_outputs, is_training=True)
-    #         return action_head_outputs
-        
-    #     if window_idx % 4 == 0:
-    #         for name, tensor in backbone_inputs.items():
-    #             print(f"{name}: grad_fn = {tensor.grad_fn}, requires_grad = {tensor.requires_grad}")
-
-    #         # Run VLM backbone and cache output
-    #         print(f"Training: window_idx={window_idx} (VLM RUNNING)")
-    #         backbone_outputs_fresh = self.backbone(backbone_inputs)
-    #         # Create completely independent copies of the outputs
-    #         detached_data = {}
-    #         for k, v in backbone_outputs_fresh.items():
-    #             if torch.is_tensor(v):
-    #                 detached_data[k] = v.clone().detach()
-    #             else:
-    #                 detached_data[k] = v
-    #         self._cached_backbone_outputs = type(backbone_outputs_fresh)(data=detached_data)
-    #         backbone_outputs = self._cached_backbone_outputs
-    #     else:
-    #         print(f"Training: window_idx={window_idx} (USING CACHED VLM)")
-    #         backbone_outputs = self._cached_backbone_outputs
-        
-    #     action_head_outputs = self.action_head(backbone_outputs, action_inputs)
-    #     self.validate_data(action_head_outputs, backbone_outputs, is_training=True)
-    #     return action_head_outputs
-
 
     def forward(self, inputs: dict, window_idx: int = None) -> BatchFeature:
         backbone_inputs, action_inputs = self.prepare_input(inputs)

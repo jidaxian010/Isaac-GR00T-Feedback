@@ -1,28 +1,10 @@
 ## combine gr00t_n1.py and policy.py for 2 brain inference
 
-import json
-import time
-from abc import ABC, abstractmethod
-from pathlib import Path
-from typing import Any, Dict, Optional, Union
-
-import numpy as np
-import torch
-from huggingface_hub import snapshot_download
-from huggingface_hub.errors import HFValidationError, RepositoryNotFoundError
-
-from gr00t.data.dataset import ModalityConfig
-from gr00t.data.embodiment_tags import EmbodimentTag
-from gr00t.data.schema import DatasetMetadata
-from gr00t.data.transform.base import ComposedModalityTransform
-
-COMPUTE_DTYPE = torch.bfloat16
-
 
 
 from dataclasses import dataclass, field
-from typing import Tuple
-
+from typing import Tuple, Any
+import copy
 import numpy as np
 import torch
 import tree
@@ -37,8 +19,6 @@ from .action_head.flow_matching_action_head import (
 )
 from .backbone import EagleBackbone
 
-#######################################################################################################
-
 BACKBONE_FEATURE_KEY = "backbone_features"
 ACTION_KEY = "action_pred"
 LOSS_KEY = "loss"
@@ -48,8 +28,8 @@ N_COLOR_CHANNELS = 3
 
 # config
 @dataclass
-class GR00T_N1Config(PretrainedConfig):
-    model_type = "gr00t_n1"
+class GR00T_N1_5_Config(PretrainedConfig):
+    model_type = "gr00t_n1_5"
     backbone_cfg: dict = field(init=False, metadata={"help": "Backbone configuration."})
 
     action_head_cfg: dict = field(init=False, metadata={"help": "Action head configuration."})
@@ -66,9 +46,9 @@ class GR00T_N1Config(PretrainedConfig):
 
 
 # real model
-class GR00T_N1(PreTrainedModel):
+class GR00T_N1_5(PreTrainedModel):
     supports_gradient_checkpointing = True
-    config_class = GR00T_N1Config
+    config_class = GR00T_N1_5_Config
     """
     we expect the backbone output to have a key 'backbone_features' with shape (batch_size, n, hidden_size)
     here n is variable and can be e.g. time, 1 or user specified
@@ -78,7 +58,7 @@ class GR00T_N1(PreTrainedModel):
 
     def __init__(
         self,
-        config: GR00T_N1Config,
+        config: GR00T_N1_5_Config,
         local_model_path: str,
     ):
         assert isinstance(config.backbone_cfg, dict)
@@ -89,6 +69,12 @@ class GR00T_N1(PreTrainedModel):
 
         self.backbone = EagleBackbone(**config.backbone_cfg)
         action_head_cfg = FlowmatchingActionHeadConfig(**config.action_head_cfg)
+        # # try overriding some data
+        # action_head_cfg.max_num_embodiments = 1
+        # action_head_cfg.action_horizon = 4
+        # print(f"overriding max_num_embodiments: {action_head_cfg.max_num_embodiments}")
+        # print(f"overriding action_horizon: {action_head_cfg.action_horizon}")
+        
         self.action_head = FlowmatchingActionHead(action_head_cfg)
 
         self.action_horizon = config.action_horizon
@@ -98,6 +84,9 @@ class GR00T_N1(PreTrainedModel):
     def validate_inputs(self, inputs):
         # NOTE -- this should be handled internally by the model
         # however, doing that will likely be breaking changes -- so we'll need to do it after the deadline
+        
+        # print(f"action_horizon: {self.action_horizon}")
+        # print(f"action_dim: {self.action_dim}")
 
         detected_error = False
         error_msg = ERROR_MSG
@@ -166,47 +155,65 @@ class GR00T_N1(PreTrainedModel):
             error_msg += f"\n{self.action_horizon=}"
             error_msg += f"\n{self.action_dim=}"
             raise ValueError(error_msg)
+    
 
-    def forward(
-        self,
-        inputs: dict,
-        window_idx: int = None,
-    ) -> BatchFeature:
-        """
-        For training that matches the fast inference architecture.
-        Only run the VLM backbone every 4th window (window_idx % 4 == 0),
-        and cache/reuse the VLM output for intermediate windows.
-        If window_idx is None, always run the backbone (backward compatible).
-        """
+    # def forward(
+    #     self,
+    #     inputs: dict,
+    #     window_idx: int = None,
+    # ) -> BatchFeature:
+    #     backbone_inputs, action_inputs = self.prepare_input(inputs)
+    #     backbone_outputs = self.backbone(backbone_inputs)
+    #     action_head_outputs = self.action_head(backbone_outputs, action_inputs)
+    #     self.validate_data(action_head_outputs, backbone_outputs, is_training=True)
+    #     return action_head_outputs
+
+
+    def forward(self, inputs: dict, window_idx: int = None) -> BatchFeature:
         backbone_inputs, action_inputs = self.prepare_input(inputs)
-        
-        if window_idx is None:
-            # Always run backbone if no window index is provided
-            print("Training: No window_idx provided, running VLM backbone")
-            backbone_outputs = self.backbone(backbone_inputs)
-            action_head_outputs = self.action_head(backbone_outputs, action_inputs)
-            self.validate_data(action_head_outputs, backbone_outputs, is_training=True)
-            return action_head_outputs
-        
-        if window_idx % 4 == 0:
-            # Run VLM backbone and cache output
-            print(f"Training: window_idx={window_idx} (VLM RUNNING)")
-            backbone_outputs = self.backbone(backbone_inputs)
-            self._cached_backbone_outputs = backbone_outputs
+        if window_idx is None or window_idx % 4 == 0:
+            # print(f"Training: window_idx={window_idx} (VLM RUNNING)")
+            fresh = self.backbone(backbone_inputs)
+            self._cached_backbone_outputs = self._detach_batchfeature(fresh)
+            backbone_outputs = self._cached_backbone_outputs
+            backbone_outputs["backbone_features"] = backbone_outputs["backbone_features"].clone().detach()
         else:
-            # Use cached VLM output
-            if not hasattr(self, '_cached_backbone_outputs'):
-                # If no cache, run VLM anyway
-                print(f"Training: window_idx={window_idx} (NO CACHE, running VLM)")
-                backbone_outputs = self.backbone(backbone_inputs)
-                self._cached_backbone_outputs = backbone_outputs
-            else:
-                print(f"Training: window_idx={window_idx} (USING CACHED VLM)")
-                backbone_outputs = self._cached_backbone_outputs
-        
+            # print(f"Training: window_idx={window_idx} (USING CACHED VLM)")
+            backbone_outputs = self._cached_backbone_outputs
+            backbone_outputs["backbone_features"] = backbone_outputs["backbone_features"].clone().detach()
+            
+            # # Debug: check detachment
+            # for name, tensor in self._cached_backbone_outputs.items():
+            #     if torch.is_tensor(tensor):
+            #         print(
+            #             f"[DETACH DEBUG backbone] {name}: requires_grad={tensor.requires_grad}, grad_fn={tensor.grad_fn}"
+            #         )
+
         action_head_outputs = self.action_head(backbone_outputs, action_inputs)
         self.validate_data(action_head_outputs, backbone_outputs, is_training=True)
         return action_head_outputs
+
+    def _detach_batchfeature(self, bf):
+        """
+        Return a copy of bf where *every* tensor in bf.data
+        has been cloned, detached, and set requires_grad=False.
+        We do this by shallow-copying bf and then replacing its .data.
+        """
+        # 1) Build a new dict of detached tensors
+        detached_data = {}
+        for k, v in bf.data.items():
+            if torch.is_tensor(v):
+                # clone so we don’t share storage, detach from any graph,
+                # and prevent any future grad requests
+                detached_data[k] = v.clone().detach().requires_grad_(False)
+            else:
+                detached_data[k] = v
+
+        # 2) Shallow-copy the original BatchFeature object
+        new_bf = copy.copy(bf)
+        # 3) Overwrite its .data with our detached copy
+        new_bf.data = detached_data
+        return new_bf
 
 
 
@@ -215,32 +222,13 @@ class GR00T_N1(PreTrainedModel):
         inputs: dict,
     ) -> BatchFeature:
         backbone_inputs, action_inputs = self.prepare_input(inputs)
-        print("Run Original VLM+DiT Model")
-        # Time the backbone (VLM) inference with proper GPU synchronization
-        torch.cuda.synchronize()
-        backbone_start_time = time.time()
+        # Because the behavior of backbones remains the same for training and inference, we can use `forward` for backbones.
         backbone_outputs = self.backbone(backbone_inputs)
-        torch.cuda.synchronize()
-        backbone_end_time = time.time()
-        backbone_inference_time = backbone_end_time - backbone_start_time
-        
-        # Time the action head (DiT) inference with proper GPU synchronization
-        torch.cuda.synchronize()
-        action_head_start_time = time.time()
         action_head_outputs = self.action_head.get_action(backbone_outputs, action_inputs)
-        torch.cuda.synchronize()
-        action_head_end_time = time.time()
-        action_head_inference_time = action_head_end_time - action_head_start_time
-        
-        # Store timing information in the outputs
-        action_head_outputs["backbone_inference_time"] = backbone_inference_time
-        action_head_outputs["action_head_inference_time"] = action_head_inference_time
-        action_head_outputs["total_inference_time"] = backbone_inference_time + action_head_inference_time
-        
         self.validate_data(action_head_outputs, backbone_outputs, is_training=False)
         return action_head_outputs
     
-
+    
     def get_action_fast(
         self,
         inputs: dict,
@@ -294,10 +282,6 @@ class GR00T_N1(PreTrainedModel):
             self.validate_data(action_head_outputs, self._cached_backbone_outputs, is_training=False)
             return action_head_outputs
             
-            
-
-
-
     def prepare_input(self, inputs) -> Tuple[BatchFeature, BatchFeature]:
         self.validate_inputs(inputs)
         backbone_inputs = self.backbone.prepare_input(inputs)
@@ -354,10 +338,61 @@ class GR00T_N1(PreTrainedModel):
 
 
 # register
-AutoConfig.register("gr00t_n1", GR00T_N1Config)
-AutoModel.register(GR00T_N1Config, GR00T_N1)
+AutoConfig.register("gr00t_n1_5", GR00T_N1_5_Config)
+AutoModel.register(GR00T_N1_5_Config, GR00T_N1_5)
+
+
 
 #######################################################################################################
+
+
+import json
+import time
+from abc import ABC, abstractmethod
+from pathlib import Path
+from typing import Any, Dict, Optional, Union
+
+import numpy as np
+import torch
+from huggingface_hub import snapshot_download
+from huggingface_hub.errors import HFValidationError, RepositoryNotFoundError
+
+from gr00t.data.dataset import ModalityConfig
+from gr00t.data.embodiment_tags import EmbodimentTag
+from gr00t.data.schema import DatasetMetadata
+from gr00t.data.transform.base import ComposedModalityTransform
+
+COMPUTE_DTYPE = torch.bfloat16
+
+
+
+from dataclasses import dataclass, field
+from typing import Tuple
+
+import numpy as np
+import torch
+import tree
+from huggingface_hub import snapshot_download
+from huggingface_hub.errors import HFValidationError, RepositoryNotFoundError
+from transformers import AutoConfig, AutoModel, PretrainedConfig, PreTrainedModel
+from transformers.feature_extraction_utils import BatchFeature
+
+from .action_head.flow_matching_action_head import (
+    FlowmatchingActionHead,
+    FlowmatchingActionHeadConfig,
+)
+from .backbone import EagleBackbone
+
+
+#######################################################################################################
+
+BACKBONE_FEATURE_KEY = "backbone_features"
+ACTION_KEY = "action_pred"
+LOSS_KEY = "loss"
+ERROR_MSG = "Error: unexpected input/output"
+N_COLOR_CHANNELS = 3
+
+
 
 
 class BasePolicy(ABC):

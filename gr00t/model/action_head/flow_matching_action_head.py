@@ -406,6 +406,26 @@ class FlowmatchingActionHead(nn.Module):
 
         # Join vision, language, state and action embedding along sequence dimension.
         future_tokens = self.future_tokens.weight.unsqueeze(0).expand(vl_embs.shape[0], -1, -1)
+
+        # Get the minimum batch size among all tensors to be concatenated
+        min_len = min(state_features.shape[0], future_tokens.shape[0], action_features.shape[0])
+
+        # Slice all tensors to the minimum batch size
+        state_features = state_features[:min_len]
+        future_tokens = future_tokens[:min_len]
+        action_features = action_features[:min_len]
+
+        # Debug printout
+        if not (state_features.shape[0] == future_tokens.shape[0] == action_features.shape[0]):
+            print(
+                f"[DEBUG] Batch size mismatch after slicing! "
+                f"state_features: {state_features.shape}, "
+                f"future_tokens: {future_tokens.shape}, "
+                f"action_features: {action_features.shape}"
+            )
+        else:
+            pass
+
         sa_embs = torch.cat((state_features, future_tokens, action_features), dim=1)
 
         vl_attn_mask = backbone_output.backbone_attention_mask
