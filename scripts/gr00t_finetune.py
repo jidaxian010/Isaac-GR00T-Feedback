@@ -21,6 +21,18 @@ from pathlib import Path
 from typing import List, Literal
 
 import torch
+import numpy as np
+import numpy.core.multiarray
+# Allowlist numpy reconstruct, ndarray, dtype, and UInt32DType for torch.load RNG state
+try:
+    torch.serialization.add_safe_globals([
+        numpy.core.multiarray._reconstruct,
+        np.ndarray,
+        np.dtype,
+        np.dtypes.UInt32DType
+    ])
+except Exception as e:
+    print(f"Warning: Could not add numpy globals to torch safe globals: {e}")
 import tyro
 from transformers import TrainingArguments
 
@@ -77,7 +89,7 @@ class ArgsConfig:
     tune_diffusion_model: bool = True
     """Whether to fine-tune the diffusion model."""
 
-    resume: bool = False
+    resume: bool = True
     """Whether to resume from a checkpoint."""
 
     # Advanced training parameters
