@@ -236,9 +236,9 @@ class GR00T_N1_5(PreTrainedModel):
     ) -> BatchFeature:
         backbone_inputs, action_inputs = self.prepare_input(inputs)
         print("Run Fast Model")
-        if time_step % 2 == 0:
+        if time_step % 4 == 0:
             # Run both backbone and action_head
-            print(f"hey, im at {time_step}")
+            print(f"im at {time_step}")
             print("320 320 320")
             torch.cuda.synchronize()
             backbone_start_time = time.time()
@@ -607,7 +607,7 @@ class SplitPolicy(BasePolicy):
 
     def _load_model(self, model_path):
         """Load the GR00T_N1 model."""
-        model = GR00T_N1.from_pretrained(model_path, torch_dtype=COMPUTE_DTYPE)
+        model = GR00T_N1_5.from_pretrained(model_path, torch_dtype=COMPUTE_DTYPE)
         model.eval()  # Set model to eval mode
         model.to(device=self.device)  # type: ignore
 

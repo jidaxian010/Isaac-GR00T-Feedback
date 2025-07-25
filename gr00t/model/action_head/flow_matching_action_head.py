@@ -382,8 +382,8 @@ class FlowmatchingActionHead(nn.Module):
         embodiment_id = action_input.embodiment_id
 
         ## Embed state.
-        # state_features = self.state_encoder(action_input.state, embodiment_id) # old encoder
-        state_features = self.state_obs_encoder(action_input.state, action_input.simple_img, embodiment_id)
+        state_features = self.state_encoder(action_input.state, embodiment_id) # old encoder
+        # state_features = self.state_obs_encoder(action_input.state, action_input.simple_img, embodiment_id)
 
         # Embed noised action trajectory.
         actions = action_input.action
@@ -467,6 +467,7 @@ class FlowmatchingActionHead(nn.Module):
 
         # Embed state.
         state_features = self.state_encoder(action_input.state, embodiment_id)
+        # state_features = self.state_obs_encoder(action_input.state, action_input.simple_img, embodiment_id)
 
         # Set initial actions as the sampled noise.
         batch_size = vl_embs.shape[0]
