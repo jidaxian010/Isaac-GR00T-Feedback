@@ -89,7 +89,7 @@ class ArgsConfig:
     tune_diffusion_model: bool = True
     """Whether to fine-tune the diffusion model."""
 
-    resume: bool = True
+    resume: bool = False
     """Whether to resume from a checkpoint."""
 
     # Advanced training parameters
