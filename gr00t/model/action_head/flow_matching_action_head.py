@@ -42,7 +42,10 @@ class CategorySpecificLinear(nn.Module):
     def forward(self, x, cat_ids):
         selected_W = self.W[cat_ids]
         selected_b = self.b[cat_ids]
-        return torch.bmm(x, selected_W) + selected_b.unsqueeze(1)
+        
+        result = torch.bmm(x, selected_W) + selected_b.unsqueeze(1)
+        
+        return result
 
 
 class CategorySpecificMLP(nn.Module):
@@ -92,18 +95,30 @@ class StateObsMLP(nn.Module):
                 nn.init.xavier_uniform_(module.weight, gain=0.01)
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
+            elif isinstance(module, nn.Conv2d):
+                nn.init.kaiming_normal_(module.weight, mode='fan_out', nonlinearity='relu')
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
 
     def forward(self, state, obs, cat_ids):
 
         obs_linear = (obs[:, -1, -1].float().view(obs.shape[0], -1)) / 255.0  # (B, 224*224*3)
+        
         obs_linear_512 = obs_linear[:, :512].unsqueeze(1)  # (B, 1, 512)
-        obs_emb = self.obs_layer_mlp(obs_linear_512, cat_ids)  # (B, 1, emb_dim)
-        # obs_emb = self.obs_layer(obs) # shape: (B, emb_dim) using cnn
+        
+        # obs_emb = self.obs_layer_mlp(obs_linear_512, cat_ids)  # (B, 1, emb_dim)
+        obs_emb = self.obs_layer(obs) # shape: (B, 1, emb_dim) using cnn
 
-        state_emb = F.relu(self.state_layer(state, cat_ids))  # shape: (B, emb_dim)
-        x = torch.cat((state_emb, obs_emb), dim=2) # shape: (B, 1, 1024)
+        # Ensure state has the right shape for CategorySpecificLinear: (B, 1, state_dim)
+        if state.dim() == 2:
+            state = state.unsqueeze(1)  # (B, state_dim) -> (B, 1, state_dim)
+        
+        state_emb = F.relu(self.state_layer(state, cat_ids))  # shape: (B, 1, emb_dim)
+        
+        x = torch.cat((state_emb, obs_emb), dim=2) # shape: (B, 1, 2*emb_dim)
 
         output = self.layer2(x, cat_ids) # 1536
+        
         return output
 
 
@@ -382,8 +397,8 @@ class FlowmatchingActionHead(nn.Module):
         embodiment_id = action_input.embodiment_id
 
         ## Embed state.
-        state_features = self.state_encoder(action_input.state, embodiment_id) # old encoder
-        # state_features = self.state_obs_encoder(action_input.state, action_input.simple_img, embodiment_id)
+        # state_features = self.state_encoder(action_input.state, embodiment_id) # old encoder
+        state_features = self.state_obs_encoder(action_input.state, action_input.simple_img, embodiment_id)
 
         # Embed noised action trajectory.
         actions = action_input.action
@@ -466,8 +481,8 @@ class FlowmatchingActionHead(nn.Module):
         embodiment_id = action_input.embodiment_id
 
         # Embed state.
-        state_features = self.state_encoder(action_input.state, embodiment_id)
-        # state_features = self.state_obs_encoder(action_input.state, action_input.simple_img, embodiment_id)
+        # state_features = self.state_encoder(action_input.state, embodiment_id)
+        state_features = self.state_obs_encoder(action_input.state, action_input.simple_img, embodiment_id)
 
         # Set initial actions as the sampled noise.
         batch_size = vl_embs.shape[0]
