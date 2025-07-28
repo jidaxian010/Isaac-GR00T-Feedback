@@ -128,17 +128,35 @@ class VLM_Updater(nn.Module):
         self.attention = nn.MultiheadAttention(embed_dim=vlm_dim, num_heads=num_heads)
 
         self.obs_encoder = ObsEncoder(emb_dim)
-        self.fusion = CategorySpecificLinear(num_categories, (emb_dim+vlm_dim), vlm_dim)
+        # Project image features to VLM dimension
+        self.img_projection = nn.Linear(emb_dim, vlm_dim)
+        # Fusion layer to combine VLM and image features
+        self.fusion = CategorySpecificLinear(num_categories, vlm_dim * 2, vlm_dim)
 
     def forward(self, obs, pre_vlm_emb, cat_ids):
-        img_features = self.obs_encoder(obs)
-
-        vlm_updated, _ = self.attention(pre_vlm_emb.unsqueeze(0), img_features.unsqueeze(0), img_features.unsqueeze(0))
-        vlm_updated = vlm_updated.squeeze(0)
-
-        combined = torch.cat((pre_vlm_emb, vlm_updated), dim=-1)
-        current_vlm = self.fusion(combined, cat_ids)
-
+        # obs: (B, T, V, H, W, C) -> ObsEncoder -> (B, emb_dim)
+        img_features = self.obs_encoder(obs)  # (B, emb_dim)
+        
+        # Project image features to VLM dimension
+        img_features_vlm = self.img_projection(img_features)  # (B, vlm_dim)
+        
+        # Expand image features to match VLM sequence length
+        B, N, D = pre_vlm_emb.shape  # (B, N, vlm_dim)
+        img_features_expanded = img_features_vlm.unsqueeze(1).expand(B, N, D)  # (B, N, vlm_dim)
+        
+        # Use attention to update VLM embeddings with image information
+        vlm_updated, _ = self.attention(
+            pre_vlm_emb,  # (B, N, vlm_dim) 
+            img_features_expanded,  # (B, N, vlm_dim)
+            img_features_expanded   # (B, N, vlm_dim)
+        )
+        
+        # Combine original and updated VLM embeddings
+        combined = torch.cat((pre_vlm_emb, vlm_updated), dim=-1)  # (B, N, vlm_dim * 2)
+        
+        # Apply fusion to get final VLM embeddings
+        current_vlm = self.fusion(combined, cat_ids)  # (B, N, vlm_dim)
+        
         return current_vlm
 
 
@@ -373,6 +391,9 @@ class FlowmatchingActionHead(nn.Module):
         return backbone_output
 
     def forward(self, backbone_output: BatchFeature, action_input: BatchFeature) -> BatchFeature:
+        """
+        1. ADD OBS
+        """
         # Set frozen modules to eval
         self.set_frozen_modules_to_eval_mode()
 
@@ -478,6 +499,141 @@ class FlowmatchingActionHead(nn.Module):
             "loss": loss,
         }
         return BatchFeature(data=output_dict)
+
+
+
+    # def forward(self, backbone_output: BatchFeature, action_input: BatchFeature, init: bool = False, ground_truth_vlm_emb: torch.Tensor = None) -> BatchFeature:
+    #     """
+    #     2. VLM UPDATER
+    #     """
+    #     # Set frozen modules to eval
+    #     self.set_frozen_modules_to_eval_mode()
+
+    #     backbone_output = self.process_backbone_output(backbone_output)
+
+    #     if self.config.expand_batch is not None:
+    #         for k, v in backbone_output.items():
+    #             ndim = len(v.shape)
+    #             factors = [self.config.expand_batch]
+    #             while len(factors) < ndim:
+    #                 factors.append(1)
+    #             factors = tuple(factors)
+    #             expanded = v.repeat(*factors)
+    #             backbone_output[k] = expanded
+
+    #         for k, v in action_input.items():
+    #             ndim = len(v.shape)
+    #             factors = [self.config.expand_batch]
+    #             while len(factors) < ndim:
+    #                 factors.append(1)
+    #             factors = tuple(factors)
+    #             expanded = v.repeat(*factors)
+    #             action_input[k] = expanded
+
+        
+    #     # Get embodiment ID.
+    #     embodiment_id = action_input.embodiment_id
+
+    #     # Get vision and language embeddings.
+    #     vl_embs = backbone_output.backbone_features
+
+    #     predicted_vlm_emb = None
+    #     if init:
+    #         # First step: use original VLM embeddings
+    #         predicted_vlm_emb = vl_embs
+    #     else:
+    #         # Other steps: update VLM embeddings with current image
+    #         predicted_vlm_emb = self.vlm_updater(action_input.simple_img, vl_embs, embodiment_id)
+    #         # Store updated embeddings for next step
+    #         backbone_output["backbone_features"] = predicted_vlm_emb
+
+    #     # Get device AFTER vl_embs might have been updated
+    #     device = predicted_vlm_emb.device
+
+    #     state_features = self.state_encoder(action_input.state, embodiment_id) # old encoder
+
+    #     # Embed noised action trajectory.
+    #     actions = action_input.action
+    #     noise = torch.randn(actions.shape, device=actions.device, dtype=actions.dtype)
+    #     t = self.sample_time(actions.shape[0], device=actions.device, dtype=actions.dtype)
+    #     t = t[:, None, None]  # shape (B,1,1) for broadcast
+
+    #     noisy_trajectory = (1 - t) * noise + t * actions
+    #     velocity = actions - noise
+
+    #     # Convert (continuous) t -> discrete if needed
+    #     t_discretized = (t[:, 0, 0] * self.num_timestep_buckets).long()
+    #     action_features = self.action_encoder(noisy_trajectory, t_discretized, embodiment_id)
+
+    #     # Maybe add position embedding.
+    #     if self.config.add_pos_embed:
+    #         pos_ids = torch.arange(action_features.shape[1], dtype=torch.long, device=device)
+    #         pos_embs = self.position_embedding(pos_ids).unsqueeze(0)
+    #         action_features = action_features + pos_embs
+
+    #     # Join vision, language, state and action embedding along sequence dimension.
+    #     future_tokens = self.future_tokens.weight.unsqueeze(0).expand(predicted_vlm_emb.shape[0], -1, -1)
+
+    #     # Get the minimum batch size among all tensors to be concatenated
+    #     min_len = min(state_features.shape[0], future_tokens.shape[0], action_features.shape[0])
+
+    #     # Slice all tensors to the minimum batch size
+    #     state_features = state_features[:min_len]
+    #     future_tokens = future_tokens[:min_len]
+    #     action_features = action_features[:min_len]
+
+    #     # Debug printout
+    #     if not (state_features.shape[0] == future_tokens.shape[0] == action_features.shape[0]):
+    #         print(
+    #             f"[DEBUG] Batch size mismatch after slicing! "
+    #             f"state_features: {state_features.shape}, "
+    #             f"future_tokens: {future_tokens.shape}, "
+    #             f"action_features: {action_features.shape}"
+    #         )
+    #     else:
+    #         pass
+
+    #     sa_embs = torch.cat((state_features, future_tokens, action_features), dim=1)
+
+    #     vl_attn_mask = backbone_output.backbone_attention_mask
+
+    #     model_output = self.model(
+    #         hidden_states=sa_embs,
+    #         encoder_hidden_states=predicted_vlm_emb,
+    #         encoder_attention_mask=vl_attn_mask,
+    #         timestep=t_discretized,
+    #         return_all_hidden_states=False,  # NOTE (YL): not using flare now
+    #     )
+    #     pred = self.action_decoder(model_output, embodiment_id)
+    #     pred_actions = pred[:, -actions.shape[1] :]
+
+    #     # Slice out only the action portion of pred and target.
+    #     action_mask = action_input.action_mask
+
+
+    #     # print("pred_actions:", pred_actions)
+    #     # print("velocity:", velocity)
+    #     # print("action_mask:", action_mask)
+    #     # print("loss (before reduction):", F.mse_loss(pred_actions, velocity, reduction="none"))
+
+    #     # Compute action loss
+    #     action_loss = F.mse_loss(pred_actions, velocity, reduction="none") * action_mask
+    #     action_loss = action_loss.sum() / action_mask.sum()
+        
+    #     # Compute VLM prediction loss (if ground truth is provided and not first step)
+    #     vlm_loss = 0.0
+    #     if ground_truth_vlm_emb is not None and not init:
+    #         vlm_loss = F.mse_loss(predicted_vlm_emb, ground_truth_vlm_emb)
+        
+    #     # Combine losses
+    #     total_loss = action_loss + 0.1 * vlm_loss  # Weight the VLM loss
+        
+    #     output_dict = {
+    #         "loss": total_loss,
+    #         "action_loss": action_loss,
+    #         "vlm_loss": vlm_loss,
+    #     }
+    #     return BatchFeature(data=output_dict)
 
     @torch.no_grad()
     def get_action(self, backbone_output: BatchFeature, action_input: BatchFeature) -> BatchFeature:

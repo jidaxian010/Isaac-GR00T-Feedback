@@ -170,6 +170,9 @@ class GR00T_N1_5(PreTrainedModel):
 
 
     def forward(self, inputs: dict, window_idx: int = None) -> BatchFeature:
+        """
+        1. ADD OBS
+        """
         backbone_inputs, action_inputs = self.prepare_input(inputs)
         if window_idx is None or window_idx % 4 == 0:
             # print(f"Training: window_idx={window_idx} (VLM RUNNING)")
@@ -192,6 +195,38 @@ class GR00T_N1_5(PreTrainedModel):
         action_head_outputs = self.action_head(backbone_outputs, action_inputs)
         self.validate_data(action_head_outputs, backbone_outputs, is_training=True)
         return action_head_outputs
+    
+    # def forward(self, inputs: dict, window_idx: int = None) -> BatchFeature:
+    #     """
+    #     2. VLM UPDATER 
+    #     """
+    #     backbone_inputs, action_inputs = self.prepare_input(inputs)
+        
+    #     # Always run VLM to get ground truth embeddings
+    #     fresh_backbone_outputs = self.backbone(backbone_inputs)
+    #     ground_truth_vlm_emb = fresh_backbone_outputs["backbone_features"]
+        
+    #     if window_idx == 0:
+    #         # First step: use fresh VLM embeddings directly
+    #         backbone_outputs = fresh_backbone_outputs
+    #         self._cached_backbone_outputs = self._detach_batchfeature(backbone_outputs)
+    #         backbone_outputs["backbone_features"] = backbone_outputs["backbone_features"].clone().detach()
+    #         init = True
+    #     else:
+    #         # Other steps: use cached embeddings (will be updated by action_head)
+    #         backbone_outputs = self._cached_backbone_outputs
+    #         backbone_outputs["backbone_features"] = backbone_outputs["backbone_features"].clone().detach()
+    #         init = False
+
+    #     # Pass ground truth embeddings for loss computation
+    #     action_head_outputs = self.action_head(backbone_outputs, action_inputs, init, ground_truth_vlm_emb)
+        
+    #     # Update cached embeddings with the updated ones from action_head
+    #     if not init and hasattr(action_head_outputs, 'updated_vlm_emb'):
+    #         self._cached_backbone_outputs["backbone_features"] = action_head_outputs.updated_vlm_emb.clone().detach()
+        
+    #     self.validate_data(action_head_outputs, backbone_outputs, is_training=True)
+    #     return action_head_outputs
 
     def _detach_batchfeature(self, bf):
         """
@@ -236,7 +271,7 @@ class GR00T_N1_5(PreTrainedModel):
     ) -> BatchFeature:
         backbone_inputs, action_inputs = self.prepare_input(inputs)
         print("Run Fast Model")
-        if time_step % 135 == 0:
+        if time_step % 4 == 0:
             # Run both backbone and action_head
             print(f"im at {time_step}")
             print("320 320 320")
