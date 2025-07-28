@@ -465,7 +465,7 @@ class FlowmatchingActionHead(nn.Module):
         # print("loss (before reduction):", F.mse_loss(pred_actions, velocity, reduction="none"))
 
         loss = F.mse_loss(pred_actions, velocity, reduction="none") * action_mask
-        loss = loss.sum() / action_mask.sum()
+        loss = loss.sum() / action_mask.sum()        
         output_dict = {
             "loss": loss,
         }

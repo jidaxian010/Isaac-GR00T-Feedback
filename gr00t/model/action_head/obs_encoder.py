@@ -29,23 +29,50 @@ class ObsEncoder(nn.Module):
         
         # Proper weight initialization
         self._init_weights()
+        
+        # Force materialization using to_empty()
+        self.to_empty(device='cpu')
+        if torch.cuda.is_available():
+            self.to('cuda')
+        
+        # Re-initialize weights after materialization
+        self._init_weights()
     
     def _print_cnn_weights(self):
         """Print CNN weights to check initialization"""
         pass
     
-
+    def _materialize_meta_tensors(self):
+        """Force materialization of meta tensors"""
+        print("[DEBUG] Materializing meta tensors...")
+        # Move to CPU first to force materialization
+        self.to('cpu')
+        for module in self.modules():
+            if isinstance(module, nn.Conv2d):
+                # Force materialization by creating a copy
+                module.weight.data = module.weight.data.clone()
+                if module.bias is not None:
+                    module.bias.data = module.bias.data.clone()
+                print(f"[DEBUG] Materialized Conv2d layer: weight range [{module.weight.min().item():.6f}, {module.weight.max().item():.6f}]")
+            elif isinstance(module, nn.Linear):
+                module.weight.data = module.weight.data.clone()
+                if module.bias is not None:
+                    module.bias.data = module.bias.data.clone()
+                print(f"[DEBUG] Materialized Linear layer: weight range [{module.weight.min().item():.6f}, {module.weight.max().item():.6f}]")
+        print("[DEBUG] Meta tensors materialized.")
     
     def _init_weights(self):
         """Initialize weights properly to avoid NaN values"""
         for module in self.modules():
             if isinstance(module, nn.Conv2d):
-                # Use a more conservative initialization
-                nn.init.normal_(module.weight, mean=0.0, std=0.01)
+                # Use very conservative initialization
+                with torch.no_grad():
+                    module.weight.data = torch.randn_like(module.weight.data) * 0.001
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
             elif isinstance(module, nn.Linear):
-                nn.init.normal_(module.weight, mean=0.0, std=0.01)
+                with torch.no_grad():
+                    module.weight.data = torch.randn_like(module.weight.data) * 0.001
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
         
