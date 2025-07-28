@@ -236,7 +236,7 @@ class GR00T_N1_5(PreTrainedModel):
     ) -> BatchFeature:
         backbone_inputs, action_inputs = self.prepare_input(inputs)
         print("Run Fast Model")
-        if time_step % 4 == 0:
+        if time_step % 135 == 0:
             # Run both backbone and action_head
             print(f"im at {time_step}")
             print("320 320 320")

@@ -121,18 +121,26 @@ class StateObsMLP(nn.Module):
         
         return output
 
-
-# Encode state and obs together
-class StateObsMLP_test(nn.Module):
-    def __init__(self, num_categories, state_input_dim, output_dim):
+class VLM_Updater(nn.Module):
+    def __init__(self, num_categories, vlm_dim, emb_dim, num_heads = 8):
         super().__init__()
-        self.num_categories = num_categories
-        self.layer1 = CategorySpecificLinear(num_categories, state_input_dim, output_dim)
-        
-    def forward(self, state, cat_ids):
-        x = F.relu(self.layer1(state, cat_ids))
+        self.vlm_dim = vlm_dim
+        self.attention = nn.MultiheadAttention(embed_dim=vlm_dim, num_heads=num_heads)
 
-        return x # 1536
+        self.obs_encoder = ObsEncoder(emb_dim)
+        self.fusion = CategorySpecificLinear(num_categories, (emb_dim+vlm_dim), vlm_dim)
+
+    def forward(self, obs, pre_vlm_emb, cat_ids):
+        img_features = self.obs_encoder(obs)
+
+        vlm_updated, _ = self.attention(pre_vlm_emb.unsqueeze(0), img_features.unsqueeze(0), img_features.unsqueeze(0))
+        vlm_updated = vlm_updated.squeeze(0)
+
+        combined = torch.cat((pre_vlm_emb, vlm_updated), dim=-1)
+        current_vlm = self.fusion(combined, cat_ids)
+
+        return current_vlm
+
 
 class MultiEmbodimentActionEncoder(nn.Module):
     def __init__(self, action_dim, hidden_size, num_embodiments):
@@ -269,10 +277,10 @@ class FlowmatchingActionHead(nn.Module):
             emb_dim=self.hidden_size // 2, # 1024 / 2 = 512
             output_dim=self.input_embedding_dim, # fixed, 1536
         )
-        self.state_obs_encoder_test = StateObsMLP_test(
+        self.vlm_updater = VLM_Updater(
             num_categories=config.max_num_embodiments,
-            state_input_dim=config.max_state_dim, # 64
-            output_dim=self.input_embedding_dim, # fixed, 1536
+            vlm_dim=self.input_embedding_dim,
+            emb_dim=self.hidden_size // 2,
         )
         self.action_encoder = MultiEmbodimentActionEncoder(
             action_dim=config.action_dim,

@@ -447,7 +447,8 @@ def main():
     # libero
     evaluator = PolicyEvaluator(
         # model_path="./checkpoints/checkpoint-first",
-        model_path="./checkpoints/checkpoint-38000",
+        # model_path="./checkpoints/checkpoint-freq-CNN",
+        model_path="./checkpoints/checkpoint-freq",
         dataset_path=os.path.join(os.path.dirname(os.path.dirname(gr00t.__file__)), "demo_data/libero_object_data"),
         embodiment_tag="libero_arm",
         data_config_name="custom_panda_hand",
