@@ -169,64 +169,66 @@ class GR00T_N1_5(PreTrainedModel):
     #     return action_head_outputs
 
 
-    def forward(self, inputs: dict, window_idx: int = None) -> BatchFeature:
-        """
-        1. ADD OBS
-        """
-        backbone_inputs, action_inputs = self.prepare_input(inputs)
-        if window_idx is None or window_idx % 4 == 0:
-            # print(f"Training: window_idx={window_idx} (VLM RUNNING)")
-            fresh = self.backbone(backbone_inputs)
-            self._cached_backbone_outputs = self._detach_batchfeature(fresh)
-            backbone_outputs = self._cached_backbone_outputs
-            backbone_outputs["backbone_features"] = backbone_outputs["backbone_features"].clone().detach()
-        else:
-            # print(f"Training: window_idx={window_idx} (USING CACHED VLM)")
-            backbone_outputs = self._cached_backbone_outputs
-            backbone_outputs["backbone_features"] = backbone_outputs["backbone_features"].clone().detach()
-            
-            # # Debug: check detachment
-            # for name, tensor in self._cached_backbone_outputs.items():
-            #     if torch.is_tensor(tensor):
-            #         print(
-            #             f"[DETACH DEBUG backbone] {name}: requires_grad={tensor.requires_grad}, grad_fn={tensor.grad_fn}"
-            #         )
-
-        action_head_outputs = self.action_head(backbone_outputs, action_inputs)
-        self.validate_data(action_head_outputs, backbone_outputs, is_training=True)
-        return action_head_outputs
-    
     # def forward(self, inputs: dict, window_idx: int = None) -> BatchFeature:
     #     """
-    #     2. VLM UPDATER 
+    #     1. ADD OBS
     #     """
     #     backbone_inputs, action_inputs = self.prepare_input(inputs)
-        
-    #     # Always run VLM to get ground truth embeddings
-    #     fresh_backbone_outputs = self.backbone(backbone_inputs)
-    #     ground_truth_vlm_emb = fresh_backbone_outputs["backbone_features"]
-        
-    #     if window_idx == 0:
-    #         # First step: use fresh VLM embeddings directly
-    #         backbone_outputs = fresh_backbone_outputs
-    #         self._cached_backbone_outputs = self._detach_batchfeature(backbone_outputs)
-    #         backbone_outputs["backbone_features"] = backbone_outputs["backbone_features"].clone().detach()
-    #         init = True
-    #     else:
-    #         # Other steps: use cached embeddings (will be updated by action_head)
+    #     if window_idx is None or window_idx % 4 == 0:
+    #         # print(f"Training: window_idx={window_idx} (VLM RUNNING)")
+    #         fresh = self.backbone(backbone_inputs)
+    #         self._cached_backbone_outputs = self._detach_batchfeature(fresh)
     #         backbone_outputs = self._cached_backbone_outputs
     #         backbone_outputs["backbone_features"] = backbone_outputs["backbone_features"].clone().detach()
-    #         init = False
+    #     else:
+    #         # print(f"Training: window_idx={window_idx} (USING CACHED VLM)")
+    #         backbone_outputs = self._cached_backbone_outputs
+    #         backbone_outputs["backbone_features"] = backbone_outputs["backbone_features"].clone().detach()
+            
+    #         # # Debug: check detachment
+    #         # for name, tensor in self._cached_backbone_outputs.items():
+    #         #     if torch.is_tensor(tensor):
+    #         #         print(
+    #         #             f"[DETACH DEBUG backbone] {name}: requires_grad={tensor.requires_grad}, grad_fn={tensor.grad_fn}"
+    #         #         )
 
-    #     # Pass ground truth embeddings for loss computation
-    #     action_head_outputs = self.action_head(backbone_outputs, action_inputs, init, ground_truth_vlm_emb)
-        
-    #     # Update cached embeddings with the updated ones from action_head
-    #     if not init and hasattr(action_head_outputs, 'updated_vlm_emb'):
-    #         self._cached_backbone_outputs["backbone_features"] = action_head_outputs.updated_vlm_emb.clone().detach()
-        
+    #     action_head_outputs = self.action_head(backbone_outputs, action_inputs)
     #     self.validate_data(action_head_outputs, backbone_outputs, is_training=True)
     #     return action_head_outputs
+    
+    def forward(self, inputs: dict, window_idx: int = None) -> BatchFeature:
+        """
+        2. VLM UPDATER 
+        """
+        backbone_inputs, action_inputs = self.prepare_input(inputs)
+        
+        # Always run VLM to get ground truth embeddings
+        fresh_backbone_outputs = self.backbone(backbone_inputs)
+        ground_truth_vlm_emb = fresh_backbone_outputs["backbone_features"]
+        
+        if window_idx == 0:
+            # First step: use fresh VLM embeddings directly
+            backbone_outputs = fresh_backbone_outputs
+            self._cached_backbone_outputs = self._detach_batchfeature(backbone_outputs)
+            backbone_outputs["backbone_features"] = backbone_outputs["backbone_features"].clone().detach()
+            init = True
+        else:
+            # Other steps: use cached embeddings (will be updated by action_head)
+            backbone_outputs = self._cached_backbone_outputs
+            backbone_outputs["backbone_features"] = backbone_outputs["backbone_features"].clone().detach()
+            init = False
+            print("not init")
+
+        # Pass ground truth embeddings for loss computation
+        action_head_outputs = self.action_head(backbone_outputs, action_inputs, init, ground_truth_vlm_emb)
+        
+        # Update cached embeddings with the updated ones from action_head
+        if not init and hasattr(action_head_outputs, 'updated_vlm_emb'):
+            self._cached_backbone_outputs["backbone_features"] = action_head_outputs.updated_vlm_emb.clone().detach()
+            print(f"Last_step dated_vlm_emb: {action_head_outputs.updated_vlm_emb.shape}")
+    
+        self.validate_data(action_head_outputs, backbone_outputs, is_training=True)
+        return action_head_outputs
 
     def _detach_batchfeature(self, bf):
         """

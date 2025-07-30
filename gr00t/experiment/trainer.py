@@ -64,6 +64,22 @@ class DualBrainTrainer(transformers.Trainer):
     def __init__(self, **kwargs):
         self.compute_dtype = kwargs.pop("compute_dtype")
         super().__init__(**kwargs)
+        
+        # Add custom logging callback
+        from transformers import TrainerCallback
+        
+        class CustomLoggingCallback(TrainerCallback):
+            def on_log(self, args, state, control, logs=None, **kwargs):
+                if logs is not None:
+                    # Add custom loss components to logs
+                    if "action_loss" in logs:
+                        logs["action_loss"] = logs["action_loss"]
+                    if "vlm_loss" in logs:
+                        logs["vlm_loss"] = logs["vlm_loss"]
+                    if "loss_breakdown" in logs:
+                        logs.update(logs["loss_breakdown"])
+        
+        self.add_callback(CustomLoggingCallback())
 
     def _get_train_sampler(self):
         # Reset window_idx at the start of each epoch
@@ -91,6 +107,11 @@ class DualBrainTrainer(transformers.Trainer):
         # print(f"window_idx: {self._window_idx}")
 
         loss = outputs["loss"]
+        
+        # Print custom loss components
+        if "action_loss" in outputs:
+            print(f"Loss breakdown - Action: {outputs['action_loss'].item():.4f}, VLM: {outputs['vlm_loss'].item():.4f}, Total: {outputs['loss'].item():.4f}")
+        
         return (loss, outputs) if return_outputs else loss
 
     def create_optimizer(self):

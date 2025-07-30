@@ -132,10 +132,27 @@ class VLM_Updater(nn.Module):
         self.img_projection = nn.Linear(emb_dim, vlm_dim)
         # Fusion layer to combine VLM and image features
         self.fusion = CategorySpecificLinear(num_categories, vlm_dim * 2, vlm_dim)
+        
+        # Initialize weights with smaller values for stability
+        self._init_weights()
+        
+        # Force materialization of meta tensors in obs_encoder
+        self.obs_encoder._materialize_meta_tensors()
+    
+    def _init_weights(self):
+        """Initialize weights with smaller values to prevent NaN"""
+        for module in [self.img_projection, self.fusion]:
+            if hasattr(module, 'weight'):
+                nn.init.xavier_uniform_(module.weight, gain=0.01)  # Smaller gain
+            if hasattr(module, 'bias') and module.bias is not None:
+                nn.init.zeros_(module.bias)
 
     def forward(self, obs, pre_vlm_emb, cat_ids):
-        # obs: (B, T, V, H, W, C) -> ObsEncoder -> (B, emb_dim)
-        img_features = self.obs_encoder(obs)  # (B, emb_dim)
+        # obs: (B, T, V, H, W, C) -> ObsEncoder -> (B, 1, emb_dim)  
+        img_features = self.obs_encoder(obs)  # (B, 1, emb_dim)
+        
+        # Remove the extra dimension to get (B, emb_dim)
+        img_features = img_features.squeeze(1)  # (B, emb_dim)
         
         # Project image features to VLM dimension
         img_features_vlm = self.img_projection(img_features)  # (B, vlm_dim)
@@ -146,9 +163,9 @@ class VLM_Updater(nn.Module):
         
         # Use attention to update VLM embeddings with image information
         vlm_updated, _ = self.attention(
-            pre_vlm_emb,  # (B, N, vlm_dim) 
-            img_features_expanded,  # (B, N, vlm_dim)
-            img_features_expanded   # (B, N, vlm_dim)
+            pre_vlm_emb,  # Query: (B, N, vlm_dim) 
+            img_features_expanded,  # Key: (B, N, vlm_dim)
+            img_features_expanded   # Value: (B, N, vlm_dim)
         )
         
         # Combine original and updated VLM embeddings
@@ -156,6 +173,9 @@ class VLM_Updater(nn.Module):
         
         # Apply fusion to get final VLM embeddings
         current_vlm = self.fusion(combined, cat_ids)  # (B, N, vlm_dim)
+        
+        # Clip values to prevent NaN propagation
+        current_vlm = torch.clamp(current_vlm, -100.0, 100.0)
         
         return current_vlm
 
@@ -297,7 +317,7 @@ class FlowmatchingActionHead(nn.Module):
         )
         self.vlm_updater = VLM_Updater(
             num_categories=config.max_num_embodiments,
-            vlm_dim=self.input_embedding_dim,
+            vlm_dim=config.backbone_embedding_dim,
             emb_dim=self.hidden_size // 2,
         )
         self.action_encoder = MultiEmbodimentActionEncoder(
@@ -389,122 +409,16 @@ class FlowmatchingActionHead(nn.Module):
         backbone_features = self.vl_self_attention(backbone_features)
         backbone_output["backbone_features"] = backbone_features
         return backbone_output
+    
+    def process_ground_truth_vlm_emb(self, ground_truth_vlm_emb: torch.Tensor) -> torch.Tensor:
+        """Process ground truth VLM embeddings the same way as backbone features"""
+        processed = self.vlln(ground_truth_vlm_emb)
+        processed = self.vl_self_attention(processed)
+        return processed
 
-    def forward(self, backbone_output: BatchFeature, action_input: BatchFeature) -> BatchFeature:
-        """
-        1. ADD OBS
-        """
-        # Set frozen modules to eval
-        self.set_frozen_modules_to_eval_mode()
-
-        backbone_output = self.process_backbone_output(backbone_output)
-
-        if self.config.expand_batch is not None:
-            for k, v in backbone_output.items():
-                ndim = len(v.shape)
-                factors = [self.config.expand_batch]
-                while len(factors) < ndim:
-                    factors.append(1)
-                factors = tuple(factors)
-                expanded = v.repeat(*factors)
-                backbone_output[k] = expanded
-
-            for k, v in action_input.items():
-                ndim = len(v.shape)
-                factors = [self.config.expand_batch]
-                while len(factors) < ndim:
-                    factors.append(1)
-                factors = tuple(factors)
-                expanded = v.repeat(*factors)
-                action_input[k] = expanded
-
-        # Get vision and language embeddings.
-        vl_embs = backbone_output.backbone_features
-        device = vl_embs.device
-
-        # Get embodiment ID.
-        embodiment_id = action_input.embodiment_id
-
-        ## Embed state.
-        # state_features = self.state_encoder(action_input.state, embodiment_id) # old encoder
-        state_features = self.state_obs_encoder(action_input.state, action_input.simple_img, embodiment_id)
-
-        # Embed noised action trajectory.
-        actions = action_input.action
-        noise = torch.randn(actions.shape, device=actions.device, dtype=actions.dtype)
-        t = self.sample_time(actions.shape[0], device=actions.device, dtype=actions.dtype)
-        t = t[:, None, None]  # shape (B,1,1) for broadcast
-
-        noisy_trajectory = (1 - t) * noise + t * actions
-        velocity = actions - noise
-
-        # Convert (continuous) t -> discrete if needed
-        t_discretized = (t[:, 0, 0] * self.num_timestep_buckets).long()
-        action_features = self.action_encoder(noisy_trajectory, t_discretized, embodiment_id)
-
-        # Maybe add position embedding.
-        if self.config.add_pos_embed:
-            pos_ids = torch.arange(action_features.shape[1], dtype=torch.long, device=device)
-            pos_embs = self.position_embedding(pos_ids).unsqueeze(0)
-            action_features = action_features + pos_embs
-
-        # Join vision, language, state and action embedding along sequence dimension.
-        future_tokens = self.future_tokens.weight.unsqueeze(0).expand(vl_embs.shape[0], -1, -1)
-
-        # Get the minimum batch size among all tensors to be concatenated
-        min_len = min(state_features.shape[0], future_tokens.shape[0], action_features.shape[0])
-
-        # Slice all tensors to the minimum batch size
-        state_features = state_features[:min_len]
-        future_tokens = future_tokens[:min_len]
-        action_features = action_features[:min_len]
-
-        # Debug printout
-        if not (state_features.shape[0] == future_tokens.shape[0] == action_features.shape[0]):
-            print(
-                f"[DEBUG] Batch size mismatch after slicing! "
-                f"state_features: {state_features.shape}, "
-                f"future_tokens: {future_tokens.shape}, "
-                f"action_features: {action_features.shape}"
-            )
-        else:
-            pass
-
-        sa_embs = torch.cat((state_features, future_tokens, action_features), dim=1)
-
-        vl_attn_mask = backbone_output.backbone_attention_mask
-
-        model_output = self.model(
-            hidden_states=sa_embs,
-            encoder_hidden_states=vl_embs,
-            encoder_attention_mask=vl_attn_mask,
-            timestep=t_discretized,
-            return_all_hidden_states=False,  # NOTE (YL): not using flare now
-        )
-        pred = self.action_decoder(model_output, embodiment_id)
-        pred_actions = pred[:, -actions.shape[1] :]
-
-        # Slice out only the action portion of pred and target.
-        action_mask = action_input.action_mask
-
-
-        # print("pred_actions:", pred_actions)
-        # print("velocity:", velocity)
-        # print("action_mask:", action_mask)
-        # print("loss (before reduction):", F.mse_loss(pred_actions, velocity, reduction="none"))
-
-        loss = F.mse_loss(pred_actions, velocity, reduction="none") * action_mask
-        loss = loss.sum() / action_mask.sum()        
-        output_dict = {
-            "loss": loss,
-        }
-        return BatchFeature(data=output_dict)
-
-
-
-    # def forward(self, backbone_output: BatchFeature, action_input: BatchFeature, init: bool = False, ground_truth_vlm_emb: torch.Tensor = None) -> BatchFeature:
+    # def forward(self, backbone_output: BatchFeature, action_input: BatchFeature) -> BatchFeature:
     #     """
-    #     2. VLM UPDATER
+    #     1. ADD OBS
     #     """
     #     # Set frozen modules to eval
     #     self.set_frozen_modules_to_eval_mode()
@@ -530,27 +444,16 @@ class FlowmatchingActionHead(nn.Module):
     #             expanded = v.repeat(*factors)
     #             action_input[k] = expanded
 
-        
+    #     # Get vision and language embeddings.
+    #     vl_embs = backbone_output.backbone_features
+    #     device = vl_embs.device
+
     #     # Get embodiment ID.
     #     embodiment_id = action_input.embodiment_id
 
-    #     # Get vision and language embeddings.
-    #     vl_embs = backbone_output.backbone_features
-
-    #     predicted_vlm_emb = None
-    #     if init:
-    #         # First step: use original VLM embeddings
-    #         predicted_vlm_emb = vl_embs
-    #     else:
-    #         # Other steps: update VLM embeddings with current image
-    #         predicted_vlm_emb = self.vlm_updater(action_input.simple_img, vl_embs, embodiment_id)
-    #         # Store updated embeddings for next step
-    #         backbone_output["backbone_features"] = predicted_vlm_emb
-
-    #     # Get device AFTER vl_embs might have been updated
-    #     device = predicted_vlm_emb.device
-
-    #     state_features = self.state_encoder(action_input.state, embodiment_id) # old encoder
+    #     ## Embed state.
+    #     # state_features = self.state_encoder(action_input.state, embodiment_id) # old encoder
+    #     state_features = self.state_obs_encoder(action_input.state, action_input.simple_img, embodiment_id)
 
     #     # Embed noised action trajectory.
     #     actions = action_input.action
@@ -572,7 +475,7 @@ class FlowmatchingActionHead(nn.Module):
     #         action_features = action_features + pos_embs
 
     #     # Join vision, language, state and action embedding along sequence dimension.
-    #     future_tokens = self.future_tokens.weight.unsqueeze(0).expand(predicted_vlm_emb.shape[0], -1, -1)
+    #     future_tokens = self.future_tokens.weight.unsqueeze(0).expand(vl_embs.shape[0], -1, -1)
 
     #     # Get the minimum batch size among all tensors to be concatenated
     #     min_len = min(state_features.shape[0], future_tokens.shape[0], action_features.shape[0])
@@ -599,7 +502,7 @@ class FlowmatchingActionHead(nn.Module):
 
     #     model_output = self.model(
     #         hidden_states=sa_embs,
-    #         encoder_hidden_states=predicted_vlm_emb,
+    #         encoder_hidden_states=vl_embs,
     #         encoder_attention_mask=vl_attn_mask,
     #         timestep=t_discretized,
     #         return_all_hidden_states=False,  # NOTE (YL): not using flare now
@@ -616,24 +519,199 @@ class FlowmatchingActionHead(nn.Module):
     #     # print("action_mask:", action_mask)
     #     # print("loss (before reduction):", F.mse_loss(pred_actions, velocity, reduction="none"))
 
-    #     # Compute action loss
-    #     action_loss = F.mse_loss(pred_actions, velocity, reduction="none") * action_mask
-    #     action_loss = action_loss.sum() / action_mask.sum()
-        
-    #     # Compute VLM prediction loss (if ground truth is provided and not first step)
-    #     vlm_loss = 0.0
-    #     if ground_truth_vlm_emb is not None and not init:
-    #         vlm_loss = F.mse_loss(predicted_vlm_emb, ground_truth_vlm_emb)
-        
-    #     # Combine losses
-    #     total_loss = action_loss + 0.1 * vlm_loss  # Weight the VLM loss
-        
+    #     loss = F.mse_loss(pred_actions, velocity, reduction="none") * action_mask
+    #     loss = loss.sum() / action_mask.sum()        
     #     output_dict = {
-    #         "loss": total_loss,
-    #         "action_loss": action_loss,
-    #         "vlm_loss": vlm_loss,
+    #         "loss": loss,
     #     }
     #     return BatchFeature(data=output_dict)
+
+
+
+    def forward(self, backbone_output: BatchFeature, action_input: BatchFeature, init: bool = False, ground_truth_vlm_emb: torch.Tensor = None) -> BatchFeature:
+        """
+        2. VLM UPDATER
+        """
+        # Set frozen modules to eval
+        self.set_frozen_modules_to_eval_mode()
+
+        backbone_output = self.process_backbone_output(backbone_output)
+
+        if self.config.expand_batch is not None:
+            for k, v in backbone_output.items():
+                ndim = len(v.shape)
+                factors = [self.config.expand_batch]
+                while len(factors) < ndim:
+                    factors.append(1)
+                factors = tuple(factors)
+                expanded = v.repeat(*factors)
+                backbone_output[k] = expanded
+
+            for k, v in action_input.items():
+                ndim = len(v.shape)
+                factors = [self.config.expand_batch]
+                while len(factors) < ndim:
+                    factors.append(1)
+                factors = tuple(factors)
+                expanded = v.repeat(*factors)
+                action_input[k] = expanded
+
+        
+        # Get embodiment ID.
+        embodiment_id = action_input.embodiment_id
+
+        # Get vision and language embeddings.
+        vl_embs = backbone_output.backbone_features
+
+        predicted_vlm_emb = None
+        if init:
+            # First step: use original VLM embeddings
+            predicted_vlm_emb = vl_embs
+        else:
+            # Other steps: update VLM embeddings with current image
+            predicted_vlm_emb = self.vlm_updater(action_input.simple_img, vl_embs, embodiment_id)
+            # Store for next step:
+            backbone_output["backbone_features"] = predicted_vlm_emb
+        # Get device AFTER vl_embs might have been updated
+        device = predicted_vlm_emb.device
+
+        state_features = self.state_encoder(action_input.state, embodiment_id) # old encoder
+
+        # Embed noised action trajectory.
+        actions = action_input.action
+        noise = torch.randn(actions.shape, device=actions.device, dtype=actions.dtype)
+        t = self.sample_time(actions.shape[0], device=actions.device, dtype=actions.dtype)
+        t = t[:, None, None]  # shape (B,1,1) for broadcast
+
+        noisy_trajectory = (1 - t) * noise + t * actions
+        velocity = actions - noise
+
+        # Convert (continuous) t -> discrete if needed
+        t_discretized = (t[:, 0, 0] * self.num_timestep_buckets).long()
+        action_features = self.action_encoder(noisy_trajectory, t_discretized, embodiment_id)
+
+        # Maybe add position embedding.
+        if self.config.add_pos_embed:
+            pos_ids = torch.arange(action_features.shape[1], dtype=torch.long, device=device)
+            pos_embs = self.position_embedding(pos_ids).unsqueeze(0)
+            action_features = action_features + pos_embs
+
+        # Join vision, language, state and action embedding along sequence dimension.
+        future_tokens = self.future_tokens.weight.unsqueeze(0).expand(predicted_vlm_emb.shape[0], -1, -1)
+
+        # Get the minimum batch size among all tensors to be concatenated
+        min_len = min(state_features.shape[0], future_tokens.shape[0], action_features.shape[0])
+
+        # Slice all tensors to the minimum batch size
+        state_features = state_features[:min_len]
+        future_tokens = future_tokens[:min_len]
+        action_features = action_features[:min_len]
+
+        # Debug printout
+        if not (state_features.shape[0] == future_tokens.shape[0] == action_features.shape[0]):
+            print(
+                f"[DEBUG] Batch size mismatch after slicing! "
+                f"state_features: {state_features.shape}, "
+                f"future_tokens: {future_tokens.shape}, "
+                f"action_features: {action_features.shape}"
+            )
+        else:
+            pass
+
+        sa_embs = torch.cat((state_features, future_tokens, action_features), dim=1)
+
+        vl_attn_mask = backbone_output.backbone_attention_mask
+
+        model_output = self.model(
+            hidden_states=sa_embs,
+            encoder_hidden_states=predicted_vlm_emb,
+            encoder_attention_mask=vl_attn_mask,
+            timestep=t_discretized,
+            return_all_hidden_states=False,  # NOTE (YL): not using flare now
+        )
+        pred = self.action_decoder(model_output, embodiment_id)
+        pred_actions = pred[:, -actions.shape[1] :]
+
+        # Slice out only the action portion of pred and target.
+        action_mask = action_input.action_mask
+
+
+        # print("pred_actions:", pred_actions)
+        # print("velocity:", velocity)
+        # print("action_mask:", action_mask)
+        # print("loss (before reduction):", F.mse_loss(pred_actions, velocity, reduction="none"))
+
+        # Compute action loss with numerical stability
+        action_loss_raw = F.mse_loss(pred_actions, velocity, reduction="none") * action_mask
+        action_loss = action_loss_raw.sum() / (action_mask.sum() + 1e-8)  # Add epsilon for stability
+        
+        # Debug action loss
+        print(f"action_loss: {action_loss.item()}")
+        print(f"action_mask.sum(): {action_mask.sum().item()}")
+        print(f"pred_actions.shape: {pred_actions.shape}")
+        print(f"velocity.shape: {velocity.shape}")
+        print(f"pred_actions range: [{pred_actions.min().item():.6f}, {pred_actions.max().item():.6f}]")
+        print(f"velocity range: [{velocity.min().item():.6f}, {velocity.max().item():.6f}]")
+        
+        # Compute VLM prediction loss (if ground truth is provided and not first step)
+        vlm_loss = torch.tensor(0.0, device=action_loss.device, dtype=action_loss.dtype)
+        if ground_truth_vlm_emb is not None and not init:
+            # Process ground truth embeddings the same way as backbone features
+            ground_truth_vlm_emb_processed = self.process_ground_truth_vlm_emb(ground_truth_vlm_emb)
+            
+            # Ensure both tensors have the same sequence length
+            min_seq_len = min(predicted_vlm_emb.shape[1], ground_truth_vlm_emb_processed.shape[1])
+            predicted_vlm_emb_sliced = predicted_vlm_emb[:, :min_seq_len, :]
+            ground_truth_vlm_emb_sliced = ground_truth_vlm_emb_processed[:, :min_seq_len, :]
+            
+            # Add numerical stability checks
+            print(f"predicted_vlm_emb_sliced range: [{predicted_vlm_emb_sliced.min().item():.6f}, {predicted_vlm_emb_sliced.max().item():.6f}]")
+            print(f"ground_truth_vlm_emb_sliced range: [{ground_truth_vlm_emb_sliced.min().item():.6f}, {ground_truth_vlm_emb_sliced.max().item():.6f}]")
+            print(f"ground_truth_vlm_emb_processed range: [{ground_truth_vlm_emb_processed.min().item():.6f}, {ground_truth_vlm_emb_processed.max().item():.6f}]")
+            
+            # Check for NaN or inf values
+            if torch.isnan(predicted_vlm_emb_sliced).any() or torch.isinf(predicted_vlm_emb_sliced).any():
+                print("WARNING: predicted_vlm_emb_sliced contains NaN or inf values!")
+            if torch.isnan(ground_truth_vlm_emb_sliced).any() or torch.isinf(ground_truth_vlm_emb_sliced).any():
+                print("WARNING: ground_truth_vlm_emb_sliced contains NaN or inf values!")
+            if torch.isnan(ground_truth_vlm_emb_processed).any() or torch.isinf(ground_truth_vlm_emb_processed).any():
+                print("WARNING: ground_truth_vlm_emb_processed contains NaN or inf values!")
+            
+            vlm_loss = F.mse_loss(predicted_vlm_emb_sliced, ground_truth_vlm_emb_sliced)
+            print(f"vlm_loss: {vlm_loss.item()}")
+            print(f"predicted_vlm_emb_sliced.shape: {predicted_vlm_emb_sliced.shape}")
+            print(f"ground_truth_vlm_emb_sliced.shape: {ground_truth_vlm_emb_sliced.shape}")
+        else:
+            print(f"VLM loss not computed - init: {init}, ground_truth_vlm_emb is None: {ground_truth_vlm_emb is None}")
+        
+        # Combine losses with numerical stability
+        total_loss = action_loss + 0.1 * vlm_loss  # Weight the VLM loss
+        
+        # Check for NaN or inf in total loss
+        if torch.isnan(total_loss) or torch.isinf(total_loss):
+            print("WARNING: total_loss is NaN or inf! Using fallback loss.")
+            total_loss = torch.tensor(1.0, device=action_loss.device, dtype=action_loss.dtype, requires_grad=True)
+        
+        print(f"total_loss: {total_loss.item()}")
+        print(f"action_loss component: {action_loss.item()}")
+        print(f"vlm_loss component: {0.1 * vlm_loss}")
+        
+        output_dict = {
+            "loss": total_loss,
+            "action_loss": action_loss,
+            "vlm_loss": vlm_loss,
+            "loss_breakdown": {
+                "action_loss": action_loss.item(),
+                "vlm_loss": vlm_loss.item(),
+                "total_loss": total_loss.item()
+            }
+        }
+        
+        # Add the updated VLM embeddings to the output for reuse
+        if not init:
+            output_dict["updated_vlm_emb"] = predicted_vlm_emb
+            
+        return BatchFeature(data=output_dict)
 
     @torch.no_grad()
     def get_action(self, backbone_output: BatchFeature, action_input: BatchFeature) -> BatchFeature:

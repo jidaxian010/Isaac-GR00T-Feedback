@@ -273,7 +273,7 @@ def main(config: ArgsConfig):
         weight_decay=config.weight_decay,
         warmup_ratio=config.warmup_ratio,
         lr_scheduler_type="cosine",
-        logging_steps=10.0,
+        logging_steps=1.0,
         num_train_epochs=300,
         max_steps=config.max_steps,
         save_strategy="steps",
