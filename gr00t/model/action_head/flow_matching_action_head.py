@@ -154,12 +154,24 @@ class VLM_Updater(nn.Module):
         # Remove the extra dimension to get (B, emb_dim)
         img_features = img_features.squeeze(1)  # (B, emb_dim)
         
+        # Debug: Check img_features
+        if torch.isnan(img_features).any() or torch.isinf(img_features).any():
+            print("WARNING: img_features contains NaN or inf values!")
+        
         # Project image features to VLM dimension
         img_features_vlm = self.img_projection(img_features)  # (B, vlm_dim)
+        
+        # Debug: Check img_features_vlm
+        if torch.isnan(img_features_vlm).any() or torch.isinf(img_features_vlm).any():
+            print("WARNING: img_features_vlm contains NaN or inf values!")
         
         # Expand image features to match VLM sequence length
         B, N, D = pre_vlm_emb.shape  # (B, N, vlm_dim)
         img_features_expanded = img_features_vlm.unsqueeze(1).expand(B, N, D)  # (B, N, vlm_dim)
+        
+        # Debug: Check pre_vlm_emb
+        if torch.isnan(pre_vlm_emb).any() or torch.isinf(pre_vlm_emb).any():
+            print("WARNING: pre_vlm_emb contains NaN or inf values!")
         
         # Use attention to update VLM embeddings with image information
         vlm_updated, _ = self.attention(
@@ -168,11 +180,23 @@ class VLM_Updater(nn.Module):
             img_features_expanded   # Value: (B, N, vlm_dim)
         )
         
+        # Debug: Check vlm_updated
+        if torch.isnan(vlm_updated).any() or torch.isinf(vlm_updated).any():
+            print("WARNING: vlm_updated contains NaN or inf values!")
+        
         # Combine original and updated VLM embeddings
         combined = torch.cat((pre_vlm_emb, vlm_updated), dim=-1)  # (B, N, vlm_dim * 2)
         
+        # Debug: Check combined
+        if torch.isnan(combined).any() or torch.isinf(combined).any():
+            print("WARNING: combined contains NaN or inf values!")
+        
         # Apply fusion to get final VLM embeddings
         current_vlm = self.fusion(combined, cat_ids)  # (B, N, vlm_dim)
+        
+        # Debug: Check current_vlm before clipping
+        if torch.isnan(current_vlm).any() or torch.isinf(current_vlm).any():
+            print("WARNING: current_vlm contains NaN or inf values before clipping!")
         
         # Clip values to prevent NaN propagation
         current_vlm = torch.clamp(current_vlm, -100.0, 100.0)
@@ -569,7 +593,9 @@ class FlowmatchingActionHead(nn.Module):
             predicted_vlm_emb = vl_embs
         else:
             # Other steps: update VLM embeddings with current image
-            predicted_vlm_emb = self.vlm_updater(action_input.simple_img, vl_embs, embodiment_id)
+            # TEMPORARILY BYPASS VLM_UPDATER TO TEST
+            predicted_vlm_emb = vl_embs  # Use original embeddings instead of updating
+            # predicted_vlm_emb = self.vlm_updater(action_input.simple_img, vl_embs, embodiment_id)
             # Store for next step:
             backbone_output["backbone_features"] = predicted_vlm_emb
         # Get device AFTER vl_embs might have been updated
