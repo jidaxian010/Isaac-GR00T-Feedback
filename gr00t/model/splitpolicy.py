@@ -225,7 +225,6 @@ class GR00T_N1_5(PreTrainedModel):
         # Update cached embeddings with the updated ones from action_head
         if not init and hasattr(action_head_outputs, 'updated_vlm_emb'):
             self._cached_backbone_outputs["backbone_features"] = action_head_outputs.updated_vlm_emb.clone().detach()
-            print(f"Last_step dated_vlm_emb: {action_head_outputs.updated_vlm_emb.shape}")
     
         self.validate_data(action_head_outputs, backbone_outputs, is_training=True)
         return action_head_outputs
