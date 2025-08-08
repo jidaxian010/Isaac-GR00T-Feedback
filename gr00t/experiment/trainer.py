@@ -81,13 +81,6 @@ class DualBrainTrainer(transformers.Trainer):
         
         self.add_callback(CustomLoggingCallback())
 
-    def _get_train_sampler(self):
-        # Reset window_idx at the start of each epoch
-        if hasattr(self, '_window_idx'):
-            print(f"Starting new epoch, resetting window_idx from {self._window_idx} to 0")
-            self._window_idx = 0
-        return BaseSampler(self.train_dataset, shuffle=True, seed=self.args.seed)
-
     def _get_eval_sampler(self, eval_dataset):
         return BaseSampler(eval_dataset, shuffle=False)
 
@@ -99,10 +92,31 @@ class DualBrainTrainer(transformers.Trainer):
         if not hasattr(self, '_window_idx'):
             self._window_idx = 0
             print(f"Starting new epoch, resetting window_idx from {self._window_idx} to 0")
+        
+        # Get trajectory information for this batch
+        if not hasattr(self, '_current_batch_indices'):
+            self._current_batch_indices = []
+        current_indices = self._get_current_batch_indices()
+        trajectory_info = self._get_trajectory_ids_for_batch(current_indices)
+        
+        # Format trajectory info for display: "traj_id(timestep)"
+        trajectory_display = []
+        trajectory_ids = []
+        for traj_id, timestep in trajectory_info:
+            if traj_id is not None:
+                trajectory_display.append(f"{traj_id}({timestep})")
+                trajectory_ids.append(traj_id)
+            else:
+                trajectory_display.append("None")
+                trajectory_ids.append(None)
+        
+        # Print trajectory info with timesteps
+        print(f"trajectory_info: {trajectory_display}, window_idx: {self._window_idx}")
+        
         # # Print every 100 batches to monitor training progress
         # if self._window_idx % 100 == 0:
         #     print(f"Training batch {self._window_idx}: window_idx={self._window_idx}, VLM will run: {self._window_idx % 4 == 0}")
-        outputs = model(inputs, window_idx=self._window_idx)
+        outputs = model(inputs, window_idx=self._window_idx, trajectory_ids=trajectory_ids)
         self._window_idx += 1
         # print(f"window_idx: {self._window_idx}")
 
@@ -113,6 +127,44 @@ class DualBrainTrainer(transformers.Trainer):
             print(f"Loss breakdown - Action: {outputs['action_loss'].item():.4f}, VLM: {outputs['vlm_loss'].item():.4f}, Total: {outputs['loss'].item():.4f}")
         
         return (loss, outputs) if return_outputs else loss
+
+    def _get_current_batch_indices(self):
+        """Helper to get current batch indices"""
+        if not hasattr(self, '_batch_counter'):
+            self._batch_counter = 0
+        batch_size = self.args.per_device_train_batch_size
+        start_idx = self._batch_counter * batch_size
+        end_idx = start_idx + batch_size
+        indices = list(range(start_idx, end_idx))
+        self._batch_counter += 1
+        return indices
+    
+    def _get_trajectory_ids_for_batch(self, indices):
+        """Helper to get trajectory IDs and timesteps(base_index) for the current batch from the dataset"""
+        trajectory_info = []
+        for idx in indices:
+            if idx < len(self.train_dataset):
+                if hasattr(self.train_dataset, 'sample_step'):
+                    dataset, trajectory_id, base_index = self.train_dataset.sample_step(idx)
+                    trajectory_info.append((trajectory_id, base_index))
+                else:
+                    # Use concurrent batching for proper recursive VLM updates
+                    trajectory_id, base_index = self.train_dataset.all_steps[idx]
+                    # trajectory_id, base_index = self.train_dataset.all_steps_concurrent[idx]
+                    trajectory_info.append((trajectory_id, base_index))
+            else:
+                trajectory_info.append((None, None))
+        return trajectory_info
+
+    def _get_train_sampler(self):
+        # Reset window_idx at the start of each epoch
+        if hasattr(self, '_window_idx'):
+            print(f"Starting new epoch, resetting window_idx from {self._window_idx} to 0")
+            self._window_idx = 0
+        if hasattr(self, '_batch_counter'):
+            print(f"Starting new epoch, resetting batch_counter from {self._batch_counter} to 0")
+            self._batch_counter = 0
+        return BaseSampler(self.train_dataset, shuffle=True, seed=self.args.seed)
 
     def create_optimizer(self):
         """

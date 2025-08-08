@@ -206,6 +206,28 @@ class LeRobotSingleDataset(Dataset):
         return self._all_steps
 
     @property
+    def all_steps_concurrent(self) -> list[tuple[int, int]]:
+        """The trajectory IDs and base indices organized for concurrent batching.
+        
+        This creates batches where each batch contains the same timestep from different trajectories.
+        
+        Example:
+            self.trajectory_ids: [0, 1, 2]
+            self.trajectory_lengths: [3, 2, 4]
+            return: [
+                # Timestep 0: (traj_0, 0), (traj_1, 0), (traj_2, 0)
+                ("traj_0", 0), ("traj_1", 0), ("traj_2", 0),
+                # Timestep 1: (traj_0, 1), (traj_1, 1), (traj_2, 1)  
+                ("traj_0", 1), ("traj_1", 1), ("traj_2", 1),
+                # Timestep 2: (traj_0, 2), (traj_2, 2)  # traj_1 only has 2 steps
+                ("traj_0", 2), ("traj_2", 2),
+                # Timestep 3: (traj_2, 3)  # only traj_2 has 4 steps
+                ("traj_2", 3)
+            ]
+        """
+        return self._get_all_steps_concurrent()
+
+    @property
     def modality_keys(self) -> dict:
         """The modality keys for the dataset. The keys are the modality names, and the values are the keys for each modality.
 
@@ -398,6 +420,40 @@ class LeRobotSingleDataset(Dataset):
         for trajectory_id, trajectory_length in zip(self.trajectory_ids, self.trajectory_lengths):
             for base_index in range(trajectory_length):
                 all_steps.append((trajectory_id, base_index))
+        print(f"self.trajectory_ids: {self.trajectory_ids}")
+        print(f"self.trajectory_lengths: {self.trajectory_lengths}")
+        print(f"all_steps: {all_steps}")
+        return all_steps
+
+    def _get_all_steps_concurrent(self) -> list[tuple[int, int]]:
+        """Get trajectory IDs and base indices organized for concurrent batching.
+        
+        This creates batches where each batch contains the same timestep from different trajectories.
+        
+        Returns:
+            list[tuple[str, int]]: A list of (trajectory_id, base_index) tuples organized by timestep.
+            
+        Example:
+            self.trajectory_ids: [0, 1, 2]
+            self.trajectory_lengths: [3, 2, 4]
+            return: [
+                # Timestep 0: (traj_0, 0), (traj_1, 0), (traj_2, 0)
+                ("traj_0", 0), ("traj_1", 0), ("traj_2", 0),
+                # Timestep 1: (traj_0, 1), (traj_1, 1), (traj_2, 1)  
+                ("traj_0", 1), ("traj_1", 1), ("traj_2", 1),
+                # Timestep 2: (traj_0, 2), (traj_2, 2)  # traj_1 only has 2 steps
+                ("traj_0", 2), ("traj_2", 2),
+                # Timestep 3: (traj_2, 3)  # only traj_2 has 4 steps
+                ("traj_2", 3)
+            ]
+        """
+        all_steps: list[tuple[int, int]] = []
+        max_length = max(self.trajectory_lengths)
+        
+        for timestep in range(max_length):
+            for trajectory_id, trajectory_length in zip(self.trajectory_ids, self.trajectory_lengths):
+                if timestep < trajectory_length:
+                    all_steps.append((trajectory_id, timestep))
         return all_steps
 
     def _get_modality_keys(self) -> dict:

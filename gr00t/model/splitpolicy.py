@@ -196,11 +196,17 @@ class GR00T_N1_5(PreTrainedModel):
     #     self.validate_data(action_head_outputs, backbone_outputs, is_training=True)
     #     return action_head_outputs
     
-    def forward(self, inputs: dict, window_idx: int = None) -> BatchFeature:
+    def forward(self, inputs: dict, window_idx: int = None, trajectory_ids: list = None) -> BatchFeature:
         """
         2. VLM UPDATER 
         """
         backbone_inputs, action_inputs = self.prepare_input(inputs)
+        
+        # Print trajectory IDs for this batch
+        if trajectory_ids is not None:
+            print(f"trajectory_ids: {trajectory_ids}, window_idx: {window_idx}")
+        else:
+            print(f"trajectory_ids: None, window_idx: {window_idx}")
         
         # Always run VLM to get ground truth embeddings
         fresh_backbone_outputs = self.backbone(backbone_inputs)
