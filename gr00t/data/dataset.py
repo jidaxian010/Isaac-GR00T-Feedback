@@ -169,6 +169,9 @@ class LeRobotSingleDataset(Dataset):
         # Check if the dataset is valid
         self._check_integrity()
 
+        # VLM-specific config
+        self._vlm_group_size = 4
+
     @property
     def dataset_path(self) -> Path:
         """The path to the dataset that contains the METADATA_FILENAME file."""
@@ -676,6 +679,59 @@ class LeRobotSingleDataset(Dataset):
             video_backend_kwargs=self.video_backend_kwargs,
         )
 
+    def get_vlm_video(
+        self,
+        trajectory_id: int,
+        key: str,
+        base_index: int,
+    ) -> np.ndarray:
+        """Get the VLM video frames anchored by grouped timesteps.
+
+        For groups of 4 steps, use the group's first timestep as the anchor:
+          - steps [0,1,2,3]  -> anchor 0
+          - steps [4,5,6,7]  -> anchor 4
+          - steps [8,9,10,11] -> anchor 8
+        Then retrieve frames using delta indices relative to the anchor.
+
+        Args:
+            dataset (BaseSingleDataset): The dataset to retrieve the data from.
+            trajectory_id (str): The ID of the trajectory.
+            key (str): The key of the video.
+            base_index (int): The base index of the trajectory.
+
+        Returns:
+            np.ndarray: The video frames for the trajectory and frame indices. Shape: (T, H, W, C)
+        """
+        # Compute anchor index for groups of 4 steps
+        group_size = self._vlm_group_size
+        anchor_index = (base_index // group_size) * group_size
+
+        # Get the step indices relative to the anchor
+        step_indices = self.delta_indices[key] + anchor_index
+        # Get the trajectory index
+        trajectory_index = self.get_trajectory_index(trajectory_id)
+        # Ensure the indices are within the valid range
+        # This is equivalent to padding the video with extra frames at the beginning and end
+        step_indices = np.maximum(step_indices, 0)
+        step_indices = np.minimum(step_indices, self.trajectory_lengths[trajectory_index] - 1)
+        assert key.startswith("video."), f"Video key must start with 'video.', got {key}"
+        # Get the sub-key
+        key = key.replace("video.", "")
+        video_path = self.get_video_path(trajectory_id, key)
+        # Get the action/state timestamps for each frame in the video
+        assert self.curr_traj_data is not None, f"No data found for {trajectory_id=}"
+        assert "timestamp" in self.curr_traj_data.columns, f"No timestamp found in {trajectory_id=}"
+        timestamp: np.ndarray = self.curr_traj_data["timestamp"].to_numpy()
+        # Get the corresponding video timestamps from the step indices
+        video_timestamp = timestamp[step_indices]
+
+        return get_frames_by_timestamps(
+            video_path.as_posix(),
+            video_timestamp,
+            video_backend=self.video_backend,
+            video_backend_kwargs=self.video_backend_kwargs,
+        )
+
     def get_state_or_action(
         self,
         trajectory_id: int,
@@ -779,6 +835,61 @@ class LeRobotSingleDataset(Dataset):
             task_indices.append(self.curr_traj_data[original_key][step_indices[i]].item())
         return self.tasks.loc[task_indices]["task"].tolist()
 
+    def get_vlm_language(
+        self,
+        trajectory_id: int,
+        key: str,
+        base_index: int,
+    ) -> list[str]:
+        """Get the VLM language annotations anchored by grouped timesteps.
+
+        For groups of 4 steps, use the group's first timestep as the anchor:
+          - steps [0,1,2,3]  -> anchor 0
+          - steps [4,5,6,7]  -> anchor 4
+          - steps [8,9,10,11] -> anchor 8
+        Then retrieve annotations using delta indices relative to the anchor.
+
+        Args:
+            dataset (BaseSingleDataset): The dataset to retrieve the data from.
+            trajectory_id (int): The ID of the trajectory.
+            key (str): The key of the annotation.
+            base_index (int): The base index of the trajectory.
+
+        Returns:
+            list[str]: The annotation data for the trajectory and step indices. If no matching data is found, return empty strings.
+        """
+        assert self.curr_traj_data is not None, f"No data found for {trajectory_id=}"
+        # Compute anchor index for groups of 4 steps
+        group_size = self._vlm_group_size
+        anchor_index = (base_index // group_size) * group_size
+        # Get the step indices relative to the anchor
+        step_indices = self.delta_indices[key] + anchor_index
+        # Get the trajectory index
+        trajectory_index = self.get_trajectory_index(trajectory_id)
+        # Get the maximum length of the trajectory
+        max_length = self.trajectory_lengths[trajectory_index]
+        # Get the end times corresponding to the closest indices
+        step_indices = np.maximum(step_indices, 0)
+        step_indices = np.minimum(step_indices, max_length - 1)
+        # Get the annotations
+        task_indices: list[int] = []
+        assert key.startswith(
+            "annotation."
+        ), f"Language key must start with 'annotation.', got {key}"
+        subkey = key.replace("annotation.", "")
+        annotation_meta = self.lerobot_modality_meta.annotation
+        assert annotation_meta is not None, f"Annotation metadata is None for {subkey}"
+        assert (
+            subkey in annotation_meta
+        ), f"Annotation key {subkey} not found in metadata, available annotation keys: {annotation_meta.keys()}"
+        subkey_meta = annotation_meta[subkey]
+        original_key = subkey_meta.original_key
+        if original_key is None:
+            original_key = key
+        for i in range(len(step_indices)):
+            task_indices.append(self.curr_traj_data[original_key][step_indices[i]].item())
+        return self.tasks.loc[task_indices]["task"].tolist()
+
     def get_data_by_modality(
         self,
         trajectory_id: int,
@@ -799,11 +910,13 @@ class LeRobotSingleDataset(Dataset):
             base_index (int): The base index of the trajectory.
         """
         if modality == "video":
+            return self.get_vlm_video(trajectory_id, key, base_index)
+        elif modality == "obs":
             return self.get_video(trajectory_id, key, base_index)
         elif modality == "state" or modality == "action":
             return self.get_state_or_action(trajectory_id, modality, key, base_index)
         elif modality == "language":
-            return self.get_language(trajectory_id, key, base_index)
+            return self.get_vlm_language(trajectory_id, key, base_index)
         else:
             raise ValueError(f"Invalid modality: {modality}")
 

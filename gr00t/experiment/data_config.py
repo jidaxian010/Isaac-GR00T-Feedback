@@ -70,6 +70,12 @@ class FourierGr1ArmsOnlyDataConfig(BaseDataConfig):
             modality_keys=self.video_keys,
         )
 
+        # Non-anchored observation stream using same physical views with distinct keys
+        obs_modality = ModalityConfig(
+            delta_indices=self.observation_indices,
+            modality_keys=[k.replace("video.", "obs.") for k in self.video_keys],
+        )
+
         state_modality = ModalityConfig(
             delta_indices=self.observation_indices,
             modality_keys=self.state_keys,
@@ -87,6 +93,7 @@ class FourierGr1ArmsOnlyDataConfig(BaseDataConfig):
 
         modality_configs = {
             "video": video_modality,
+            "obs": obs_modality,
             "state": state_modality,
             "action": action_modality,
             "language": language_modality,
