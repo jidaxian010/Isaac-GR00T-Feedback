@@ -102,7 +102,7 @@ class StateObsMLP(nn.Module):
 
     def forward(self, state, obs, cat_ids):
 
-        obs_linear = (obs[:, -1, -1].float().view(obs.shape[0], -1)) / 255.0  # (B, 224*224*3)
+        obs_linear = (obs[:, -1, -1].float().reshape(obs.shape[0], -1)) / 255.0  # (B, 224*224*3)
         
         obs_linear_512 = obs_linear[:, :512].unsqueeze(1)  # (B, 1, 512)
         
@@ -500,7 +500,7 @@ class FlowmatchingActionHead(nn.Module):
     #             expanded = v.repeat(*factors)
     #             action_input[k] = expanded
 
-        
+
     #     # Get embodiment ID.
     #     embodiment_id = action_input.embodiment_id
 

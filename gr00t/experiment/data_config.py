@@ -927,19 +927,23 @@ class PandaHandDataConfig(BaseDataConfig): # libero panda hand
         return modality_configs
 
     def transform(self):
+        # Mirror video keys to create non-anchored observation keys
+        obs_keys = [k.replace("video.", "obs.") for k in self.video_keys]
+        all_video_like_keys = self.video_keys + obs_keys
+
         transforms = [
-            # video transforms
-            VideoToTensor(apply_to=self.video_keys),
-            VideoCrop(apply_to=self.video_keys, scale=0.95),
-            VideoResize(apply_to=self.video_keys, height=224, width=224, interpolation="linear"),
+            # video transforms (apply to both anchored video.* and non-anchored obs.*)
+            VideoToTensor(apply_to=all_video_like_keys),
+            VideoCrop(apply_to=all_video_like_keys, scale=0.95),
+            VideoResize(apply_to=all_video_like_keys, height=224, width=224, interpolation="linear"),
             VideoColorJitter(
-                apply_to=self.video_keys,
+                apply_to=all_video_like_keys,
                 brightness=0.3,
                 contrast=0.4,
                 saturation=0.5,
                 hue=0.08,
             ),
-            VideoToNumpy(apply_to=self.video_keys),
+            VideoToNumpy(apply_to=all_video_like_keys),
             # state transforms
             StateActionToTensor(apply_to=self.state_keys),
             StateActionTransform(
@@ -955,6 +959,7 @@ class PandaHandDataConfig(BaseDataConfig): # libero panda hand
             # concat transforms
             ConcatTransform(
                 video_concat_order=self.video_keys,
+                obs_concat_order=obs_keys,
                 state_concat_order=self.state_keys,
                 action_concat_order=self.action_keys,
             ),

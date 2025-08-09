@@ -313,8 +313,8 @@ class GR00TTransform(InvertibleModalityTransform):
         transformed_data["state"] = state
         transformed_data["state_mask"] = state_mask
 
-        # 2.5) Prepare simple image
-        simple_img = data["video"]
+        # 2.5) Prepare simple image (use only non-anchored obs)
+        simple_img = data["obs"]
         transformed_data["simple_img"] = simple_img
 
         if self.training:
@@ -338,9 +338,6 @@ class GR00TTransform(InvertibleModalityTransform):
                 transformed_data[key].shape == transformed_data["action"].shape
                 for key in action_and_mask_keys
             ), f"Shape mismatch: {[(key, transformed_data[key].shape) for key in action_and_mask_keys]}"
-
-        # Add your simple image processing
-        transformed_data["simple_img"] = images
 
         return transformed_data
 

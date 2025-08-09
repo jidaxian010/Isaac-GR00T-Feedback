@@ -39,6 +39,13 @@ class ConcatTransform(InvertibleModalityTransform):
         "Format: ['video.ego_view_pad_res224_freq20', ...]",
     )
 
+    # New: non-anchored observation streams to be concatenated like video
+    obs_concat_order: Optional[list[str]] = Field(
+        default=None,
+        description="Concatenation order for each obs modality. "
+        "Format: ['obs.ego_view_pad_res224_freq20', ...]",
+    )
+
     state_concat_order: Optional[list[str]] = Field(
         default=None,
         description="Concatenation order for each state modality. "
@@ -65,6 +72,7 @@ class ConcatTransform(InvertibleModalityTransform):
             include = {
                 "apply_to",
                 "video_concat_order",
+                "obs_concat_order",
                 "state_concat_order",
                 "action_concat_order",
             }
@@ -110,6 +118,19 @@ class ConcatTransform(InvertibleModalityTransform):
 
             # Video
             data["video"] = unsqueezed_video
+
+        # New: concatenate obs views similar to video
+        if "obs" in grouped_keys and self.obs_concat_order is not None:
+            obs_keys = grouped_keys["obs"]
+            assert all(
+                item in obs_keys for item in self.obs_concat_order
+            ), f"keys in obs_concat_order are misspecified, \n{obs_keys=}, \n{self.obs_concat_order=}"
+            unsqueezed_obs = []
+            for obs_key in self.obs_concat_order:
+                obs_data = data.pop(obs_key)
+                unsqueezed = np.expand_dims(obs_data, axis=-4)  # [..., 1, H, W, C]
+                unsqueezed_obs.append(unsqueezed)
+            data["obs"] = np.concatenate(unsqueezed_obs, axis=-4)  # [..., V, H, W, C]
 
         # "state"
         if "state" in grouped_keys:

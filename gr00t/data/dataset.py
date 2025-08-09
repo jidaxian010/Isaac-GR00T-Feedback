@@ -508,7 +508,8 @@ class LeRobotSingleDataset(Dataset):
             dict: The data for the step.
         """
         trajectory_id, base_index = self.all_steps[index]
-        return self.transforms(self.get_step_data(trajectory_id, base_index))
+        data = self.transforms(self.get_step_data(trajectory_id, base_index))
+        return data
 
     def get_step_data(self, trajectory_id: int, base_index: int) -> dict:
         """Get the RAW data for a single step in a trajectory. No transforms are applied.
@@ -543,6 +544,11 @@ class LeRobotSingleDataset(Dataset):
             # Get the data corresponding to each key in the modality
             for key in self.modality_keys[modality]:
                 data[key] = self.get_data_by_modality(trajectory_id, modality, key, base_index)
+                # Additionally expose non-anchored observations under obs.* using the same raw source
+                if modality == "video" and key.startswith("video."):
+                    obs_key = key.replace("video.", "obs.")
+                    # Non-anchored fetch uses current timestep mapping
+                    data[obs_key] = self.get_video(trajectory_id, key, base_index)
         return data
 
     def get_trajectory_data(self, trajectory_id: int) -> pd.DataFrame:
