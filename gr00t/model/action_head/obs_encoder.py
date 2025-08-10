@@ -9,15 +9,19 @@ class ObsEncoder(nn.Module):
         # Very simple CNN structure to avoid NaN issues
         self.encoder = nn.Sequential(
             nn.Conv2d(3, 32, 3, padding=1),
+            nn.BatchNorm2d(32),
             nn.ReLU(),
             nn.MaxPool2d(2),
             nn.Conv2d(32, 64, 3, padding=1),
+            nn.BatchNorm2d(64),
             nn.ReLU(),
             nn.MaxPool2d(2),
             nn.Conv2d(64, 128, 3, padding=1),
+            nn.BatchNorm2d(128),
             nn.ReLU(),
             nn.MaxPool2d(2),
             nn.Conv2d(128, 256, 3, padding=1),
+            nn.BatchNorm2d(256),
             nn.ReLU(),
             nn.AdaptiveAvgPool2d((1, 1)),  # Global average pooling
         )
@@ -37,10 +41,39 @@ class ObsEncoder(nn.Module):
         
         # Re-initialize weights after materialization
         self._init_weights()
+        
+        # Print network structure and weights for debugging
+        self._print_cnn_weights()
     
     def _print_cnn_weights(self):
         """Print CNN weights to check initialization"""
-        pass
+        print("[DEBUG] === CNN Structure and Weights ===")
+        for i, layer in enumerate(self.encoder):
+            print(f"[DEBUG] Layer {i}: {layer}")
+            if hasattr(layer, 'weight'):
+                weight = layer.weight.data
+                print(f"[DEBUG]   Weight shape: {weight.shape}")
+                print(f"[DEBUG]   Weight range: [{weight.min().item():.6f}, {weight.max().item():.6f}]")
+                print(f"[DEBUG]   Weight mean: {weight.mean().item():.6f}")
+                print(f"[DEBUG]   Weight std: {weight.std().item():.6f}")
+            if hasattr(layer, 'bias') and layer.bias is not None:
+                bias = layer.bias.data
+                print(f"[DEBUG]   Bias shape: {bias.shape}")
+                print(f"[DEBUG]   Bias range: [{bias.min().item():.6f}, {bias.max().item():.6f}]")
+        print("[DEBUG] === FC Layers ===")
+        for i, layer in enumerate(self.fc):
+            print(f"[DEBUG] Layer {i}: {layer}")
+            if hasattr(layer, 'weight'):
+                weight = layer.weight.data
+                print(f"[DEBUG]   Weight shape: {weight.shape}")
+                print(f"[DEBUG]   Weight range: [{weight.min().item():.6f}, {weight.max().item():.6f}]")
+                print(f"[DEBUG]   Weight mean: {weight.mean().item():.6f}")
+                print(f"[DEBUG]   Weight std: {weight.std().item():.6f}")
+            if hasattr(layer, 'bias') and layer.bias is not None:
+                bias = layer.bias.data
+                print(f"[DEBUG]   Bias shape: {bias.shape}")
+                print(f"[DEBUG]   Bias range: [{bias.min().item():.6f}, {bias.max().item():.6f}]")
+        print("[DEBUG] =================================")
     
     def _materialize_meta_tensors(self):
         """Force materialization of meta tensors"""
@@ -65,16 +98,20 @@ class ObsEncoder(nn.Module):
         """Initialize weights properly to avoid NaN values"""
         for module in self.modules():
             if isinstance(module, nn.Conv2d):
-                # Use very conservative initialization
+                # Keep your safe initialization - 0.02 that works
                 with torch.no_grad():
-                    module.weight.data = torch.randn_like(module.weight.data) * 0.001
+                    module.weight.data = torch.randn_like(module.weight.data) * 0.02
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
             elif isinstance(module, nn.Linear):
                 with torch.no_grad():
-                    module.weight.data = torch.randn_like(module.weight.data) * 0.001
+                    module.weight.data = torch.randn_like(module.weight.data) * 0.02
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
+            elif isinstance(module, nn.BatchNorm2d):
+                # Safe batch norm initialization
+                nn.init.ones_(module.weight)
+                nn.init.zeros_(module.bias)
         
 
 
@@ -114,6 +151,7 @@ class ObsEncoder(nn.Module):
         emb = torch.clamp(emb, -10.0, 10.0)
         
         emb = emb.unsqueeze(1)  # (B, 1, emb_dim)
+        print(f"[DEBUG] Final output: shape={emb.shape}, range=[{emb.min().item():.6f}, {emb.max().item():.6f}]")
 
         return emb
 
