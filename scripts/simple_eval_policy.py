@@ -7,6 +7,8 @@ import pandas as pd
 import time
 
 from gr00t.data.dataset import LeRobotSingleDataset
+from gr00t.data.dataset_inference import LeRobotSingleDatasetInference
+
 from gr00t.model.policy import Gr00tPolicy
 from gr00t.model.splitpolicy import SplitPolicy
 from gr00t.experiment.data_config import DATA_CONFIG_MAP
@@ -77,7 +79,7 @@ class PolicyEvaluator:
 
     def _init_dataset(self):
         """Initialize the dataset."""
-        self.dataset = LeRobotSingleDataset(
+        self.dataset = LeRobotSingleDatasetInference(
             dataset_path=self.dataset_path,
             modality_configs=self.modality_config,
             video_backend=self.video_backend,
@@ -303,6 +305,11 @@ class PolicyEvaluator:
         for time_step in range(self.num_episodes):
             # Get ground truth for comparison
             step_data = self.dataset[time_step]
+            print("step_data keys",step_data.keys())
+            if not np.array_equal(step_data['video.agentview_rgb'], step_data['obs.agentview_rgb']):
+                raise ValueError(f"shape of video {step_data['video.agentview_rgb'].shape} and shape of obs {step_data['obs.agentview_rgb'].shape}")
+
+
             gt_all_actions = step_data["action.all_actions"]
             gt_all_actions_list.append(gt_all_actions[0])
             joint_states_list.append(step_data["state.joint_states"][0])
@@ -416,7 +423,7 @@ class PolicyEvaluator:
             trajectory_id, base_index = self.dataset.all_steps[i]
             
             # Get predicted action
-            action = self.policy.get_action(step_data)
+            action = self.policy.get_action(step_data, time_step=i, select_model_fast=True, print_timing=False)
             predicted_action = action["action.all_actions"][0]  # Get first element from batch
             
             
@@ -448,7 +455,7 @@ def main():
     evaluator = PolicyEvaluator(
         # model_path="./checkpoints/checkpoint-first",
         # model_path="./checkpoints/checkpoint-freq-CNN",
-        model_path="./checkpoints/checkpoint-freq",
+        model_path="./checkpoints/checkpoint-obs4",
         dataset_path=os.path.join(os.path.dirname(os.path.dirname(gr00t.__file__)), "demo_data/libero_object_data"),
         embodiment_tag="libero_arm",
         data_config_name="custom_panda_hand",
