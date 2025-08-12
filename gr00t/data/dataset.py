@@ -170,7 +170,7 @@ class LeRobotSingleDataset(Dataset):
         self._check_integrity()
 
         # VLM-specific config
-        self._vlm_group_size = 4
+        self._vlm_group_size = 1
 
     @property
     def dataset_path(self) -> Path:

@@ -305,10 +305,16 @@ class PolicyEvaluator:
         for time_step in range(self.num_episodes):
             # Get ground truth for comparison
             step_data = self.dataset[time_step]
-            print("step_data keys",step_data.keys())
             if not np.array_equal(step_data['video.agentview_rgb'], step_data['obs.agentview_rgb']):
                 raise ValueError(f"shape of video {step_data['video.agentview_rgb'].shape} and shape of obs {step_data['obs.agentview_rgb'].shape}")
 
+            # step_data['video.agentview_rgb'] = np.random.randint(0, 256, step_data['video.agentview_rgb'].shape, dtype=np.uint8)
+            # step_data['video.eye_in_hand_rgb'] = np.random.randint(0, 256, step_data['video.eye_in_hand_rgb'].shape, dtype=np.uint8)
+            # step_data['obs.agentview_rgb'] = np.random.randint(0, 256, step_data['obs.agentview_rgb'].shape, dtype=np.uint8)
+            # step_data['obs.eye_in_hand_rgb'] = np.random.randint(0, 256, step_data['obs.eye_in_hand_rgb'].shape, dtype=np.uint8)
+
+            # step_data['state.ee_pos'] = np.random.randn(*step_data['state.ee_pos'].shape).astype(step_data['state.ee_pos'].dtype)
+            # step_data['state.ee_ori'] = np.random.randn(*step_data['state.ee_ori'].shape).astype(step_data['state.ee_ori'].dtype)
 
             gt_all_actions = step_data["action.all_actions"]
             gt_all_actions_list.append(gt_all_actions[0])
