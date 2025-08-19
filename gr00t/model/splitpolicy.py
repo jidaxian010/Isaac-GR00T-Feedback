@@ -174,23 +174,7 @@ class GR00T_N1_5(PreTrainedModel):
         1. ADD OBS
         """
         backbone_inputs, action_inputs = self.prepare_input(inputs)
-        if window_idx is None or window_idx % 4 == 0:
-            # print(f"Training: window_idx={window_idx} (VLM RUNNING)")
-            fresh = self.backbone(backbone_inputs)
-            self._cached_backbone_outputs = self._detach_batchfeature(fresh)
-            backbone_outputs = self._cached_backbone_outputs
-            backbone_outputs["backbone_features"] = backbone_outputs["backbone_features"].clone().detach()
-        else:
-            # print(f"Training: window_idx={window_idx} (USING CACHED VLM)")
-            backbone_outputs = self._cached_backbone_outputs
-            backbone_outputs["backbone_features"] = backbone_outputs["backbone_features"].clone().detach()
-            
-            # # Debug: check detachment
-            # for name, tensor in self._cached_backbone_outputs.items():
-            #     if torch.is_tensor(tensor):
-            #         print(
-            #             f"[DETACH DEBUG backbone] {name}: requires_grad={tensor.requires_grad}, grad_fn={tensor.grad_fn}"
-            #         )
+        backbone_outputs = self.backbone(backbone_inputs)
 
         action_head_outputs = self.action_head(backbone_outputs, action_inputs)
         self.validate_data(action_head_outputs, backbone_outputs, is_training=True)

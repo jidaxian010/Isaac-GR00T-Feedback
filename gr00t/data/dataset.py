@@ -115,6 +115,7 @@ class LeRobotSingleDataset(Dataset):
         video_backend: str = "decord",
         video_backend_kwargs: dict | None = None,
         transforms: ComposedModalityTransform | None = None,
+        is_anchored: bool = True,
     ):
         """
         Initialize the dataset.
@@ -163,6 +164,7 @@ class LeRobotSingleDataset(Dataset):
         self._video_path_pattern = self._get_video_path_pattern()
         self._chunk_size = self._get_chunk_size()
         self._tasks = self._get_tasks()
+        self.is_anchored = is_anchored
         self.curr_traj_data = None
         self.curr_traj_id = None
 
@@ -170,7 +172,7 @@ class LeRobotSingleDataset(Dataset):
         self._check_integrity()
 
         # VLM-specific config
-        self._vlm_group_size = 1
+        self._vlm_group_size = 4
 
     @property
     def dataset_path(self) -> Path:
@@ -543,7 +545,7 @@ class LeRobotSingleDataset(Dataset):
         for modality in self.modality_keys:
             # Get the data corresponding to each key in the modality
             for key in self.modality_keys[modality]:
-                data[key] = self.get_data_by_modality(trajectory_id, modality, key, base_index)
+                data[key] = self.get_data_by_modality(trajectory_id, modality, key, base_index, is_anchored=self.is_anchored)
                 # Additionally expose non-anchored observations under obs.* using the same raw source
                 if modality == "video" and key.startswith("video."):
                     obs_key = key.replace("video.", "obs.")
@@ -902,6 +904,7 @@ class LeRobotSingleDataset(Dataset):
         modality: str,
         key: str,
         base_index: int,
+        is_anchored: bool = True,
     ):
         """Get the data corresponding to the modality for a trajectory by a base index.
         This method will call the corresponding helper method based on the modality.
@@ -915,16 +918,28 @@ class LeRobotSingleDataset(Dataset):
             key (str): The key of the data.
             base_index (int): The base index of the trajectory.
         """
-        if modality == "video":
-            return self.get_vlm_video(trajectory_id, key, base_index)
-        elif modality == "obs":
-            return self.get_video(trajectory_id, key, base_index)
-        elif modality == "state" or modality == "action":
-            return self.get_state_or_action(trajectory_id, modality, key, base_index)
-        elif modality == "language":
-            return self.get_vlm_language(trajectory_id, key, base_index)
+        if is_anchored:
+            if modality == "video":
+                return self.get_vlm_video(trajectory_id, key, base_index)
+            elif modality == "obs":
+                return self.get_video(trajectory_id, key, base_index)
+            elif modality == "state" or modality == "action":
+                return self.get_state_or_action(trajectory_id, modality, key, base_index)
+            elif modality == "language":
+                return self.get_vlm_language(trajectory_id, key, base_index)
+            else:
+                raise ValueError(f"Invalid modality: {modality}")
         else:
-            raise ValueError(f"Invalid modality: {modality}")
+            if modality == "video":
+                return self.get_video(trajectory_id, key, base_index)
+            elif modality == "obs":
+                return self.get_video(trajectory_id, key, base_index)
+            elif modality == "state" or modality == "action":
+                return self.get_state_or_action(trajectory_id, modality, key, base_index)
+            elif modality == "language":
+                return self.get_language(trajectory_id, key, base_index)
+            else:
+                raise ValueError(f"Invalid modality: {modality}")
 
 
 class CachedLeRobotSingleDataset(LeRobotSingleDataset):
