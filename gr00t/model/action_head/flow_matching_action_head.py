@@ -259,6 +259,10 @@ class FlowmatchingActionHead(nn.Module):
             emb_dim=self.hidden_size // 2, # 1024 / 2 = 512
             output_dim=self.input_embedding_dim, # fixed, 1536
         )
+
+        self.obs_encoder = ObsEncoder(self.hidden_size // 2)
+        self.obs_encoder_alone = ObsEncoder(emb_dim=2048)  # Match Eagle backbone output dimension
+
         self.vlm_updater = VLM_Updater(
             num_categories=config.max_num_embodiments,
             vlm_dim=config.backbone_embedding_dim,
@@ -391,6 +395,8 @@ class FlowmatchingActionHead(nn.Module):
         # Get vision and language embeddings.
         vl_embs = backbone_output.backbone_features
         device = vl_embs.device
+        print(f"[DEBUG] vl_embs output: shape={vl_embs.shape}, range=[{vl_embs.min().item():.6f}, {vl_embs.max().item():.6f}]")
+
 
         # Get embodiment ID.
         embodiment_id = action_input.embodiment_id
@@ -398,6 +404,12 @@ class FlowmatchingActionHead(nn.Module):
         ## Embed state.
         state_features = self.state_encoder(action_input.state, embodiment_id) # old encoder
         # state_features = self.state_obs_encoder(action_input.state, action_input.simple_img, embodiment_id)
+        obs_features = self.obs_encoder_alone(action_input.simple_img)  # (B, 1, 2048)
+
+        # Expand obs_features to match vl_embs sequence length and add
+        obs_features_expanded = obs_features.expand(-1, vl_embs.shape[1], -1)  # (B, T, 2048)
+        vl_embs = obs_features_expanded + vl_embs  # (B, T, 2048)
+        print(f"[DEBUG] update output: shape={vl_embs.shape}, range=[{vl_embs.min().item():.6f}, {vl_embs.max().item():.6f}]")
 
         # Embed noised action trajectory.
         actions = action_input.action

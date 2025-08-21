@@ -249,6 +249,60 @@ class GR00T_N1_5(PreTrainedModel):
         return action_head_outputs
     
     
+    # def get_action_fast(
+    #     self,
+    #     inputs: dict,
+    #     time_step: int,
+    # ) -> BatchFeature:
+    #     backbone_inputs, action_inputs = self.prepare_input(inputs)
+    #     print("Run Fast Model")
+    #     if time_step % 1 == 0:
+    #         # Run both backbone and action_head
+    #         print(f"im at {time_step}")
+    #         print("320 320 320")
+    #         torch.cuda.synchronize()
+    #         backbone_start_time = time.time()
+    #         backbone_outputs = self.backbone(backbone_inputs)
+    #         torch.cuda.synchronize()
+    #         backbone_end_time = time.time()
+    #         backbone_inference_time = backbone_end_time - backbone_start_time
+
+    #         self._cached_backbone_outputs = backbone_outputs
+
+    #         torch.cuda.synchronize()
+    #         action_head_start_time = time.time()
+    #         action_head_outputs = self.action_head.get_action(backbone_outputs, action_inputs)
+    #         torch.cuda.synchronize()
+    #         action_head_end_time = time.time()
+    #         action_head_inference_time = action_head_end_time - action_head_start_time
+
+    #         action_head_outputs["backbone_inference_time"] = backbone_inference_time
+    #         action_head_outputs["action_head_inference_time"] = action_head_inference_time
+    #         action_head_outputs["total_inference_time"] = backbone_inference_time + action_head_inference_time
+
+    #         self.validate_data(action_head_outputs, backbone_outputs, is_training=False)
+    #         return action_head_outputs
+    #     else:
+    #         print(f"hey, im at {time_step}") 
+    #         # Reuse cached backbone outputs, only run action_head
+    #         if not hasattr(self, '_cached_backbone_outputs'):
+    #             raise ValueError(f"No cached backbone outputs available at timestep {time_step}")
+            
+    #         torch.cuda.synchronize()
+    #         action_head_start_time = time.time()
+    #         action_head_outputs = self.action_head.get_action(self._cached_backbone_outputs, action_inputs)
+    #         torch.cuda.synchronize()
+    #         action_head_end_time = time.time()
+    #         action_head_inference_time = action_head_end_time - action_head_start_time
+
+    #         action_head_outputs["backbone_inference_time"] = 0.0
+    #         action_head_outputs["action_head_inference_time"] = action_head_inference_time
+    #         action_head_outputs["total_inference_time"] = action_head_inference_time
+
+    #         self.validate_data(action_head_outputs, self._cached_backbone_outputs, is_training=False)
+    #         return action_head_outputs
+    
+
     def get_action_fast(
         self,
         inputs: dict,
@@ -256,13 +310,13 @@ class GR00T_N1_5(PreTrainedModel):
     ) -> BatchFeature:
         backbone_inputs, action_inputs = self.prepare_input(inputs)
         print("Run Fast Model")
-        if time_step % 1 == 0:
+        if time_step % 2 == 0:
             # Run both backbone and action_head
             print(f"im at {time_step}")
             print("320 320 320")
             torch.cuda.synchronize()
             backbone_start_time = time.time()
-            backbone_outputs = self.backbone(backbone_inputs)
+            backbone_outputs = self.backbone(backbone_inputs) # vlm
             torch.cuda.synchronize()
             backbone_end_time = time.time()
             backbone_inference_time = backbone_end_time - backbone_start_time
@@ -271,7 +325,7 @@ class GR00T_N1_5(PreTrainedModel):
 
             torch.cuda.synchronize()
             action_head_start_time = time.time()
-            action_head_outputs = self.action_head.get_action(backbone_outputs, action_inputs)
+            action_head_outputs = self.action_head.get_action(backbone_outputs, action_inputs) # DiT
             torch.cuda.synchronize()
             action_head_end_time = time.time()
             action_head_inference_time = action_head_end_time - action_head_start_time
@@ -301,6 +355,7 @@ class GR00T_N1_5(PreTrainedModel):
 
             self.validate_data(action_head_outputs, self._cached_backbone_outputs, is_training=False)
             return action_head_outputs
+
             
     def prepare_input(self, inputs) -> Tuple[BatchFeature, BatchFeature]:
         self.validate_inputs(inputs)

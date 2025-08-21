@@ -6,27 +6,57 @@ import torch.nn.functional as F
 class ObsEncoder(nn.Module):
     def __init__(self, emb_dim: int = 512):
         super().__init__()
-        # Very simple CNN structure to avoid NaN issues
+        # Enhanced spatial-aware CNN structure with ResNet-style blocks
         self.encoder = nn.Sequential(
-            nn.Conv2d(3, 32, 3, padding=1),
+            # Initial conv - preserve spatial info
+            nn.Conv2d(3, 32, 7, stride=2, padding=3),  # 112x112
             nn.BatchNorm2d(32),
             nn.ReLU(),
-            nn.MaxPool2d(2),
-            nn.Conv2d(32, 64, 3, padding=1),
+            
+            # ResNet-style block 1 - maintain spatial resolution
+            nn.Conv2d(32, 32, 3, padding=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            nn.Conv2d(32, 32, 3, padding=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            
+            # Downsample to 56x56
+            nn.Conv2d(32, 64, 3, stride=2, padding=1),
             nn.BatchNorm2d(64),
             nn.ReLU(),
-            nn.MaxPool2d(2),
-            nn.Conv2d(64, 128, 3, padding=1),
+            
+            # ResNet-style block 2 - maintain spatial resolution
+            nn.Conv2d(64, 64, 3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, 3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            
+            # Downsample to 28x28
+            nn.Conv2d(64, 128, 3, stride=2, padding=1),
             nn.BatchNorm2d(128),
             nn.ReLU(),
-            nn.MaxPool2d(2),
+            
+            # ResNet-style block 3 - maintain spatial resolution
+            nn.Conv2d(128, 128, 3, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(),
+            nn.Conv2d(128, 128, 3, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(),
+            
+            # Final conv to 256 channels
             nn.Conv2d(128, 256, 3, padding=1),
             nn.BatchNorm2d(256),
             nn.ReLU(),
-            nn.AdaptiveAvgPool2d((1, 1)),  # Global average pooling
+            
+            # Spatial-aware pooling - 7x7 grid instead of 1x1 to preserve spatial info
+            nn.AdaptiveAvgPool2d((7, 7)),  # 7x7 spatial grid preserves location info
         )
         self.fc = nn.Sequential(
-            nn.Linear(256, 256),
+            nn.Linear(256 * 7 * 7, 256),  # 256 * 7 * 7 = 12544 input features
             nn.ReLU(),
             nn.Linear(256, emb_dim)
         )
@@ -123,7 +153,7 @@ class ObsEncoder(nn.Module):
         Returns:
             emb: Tensor of shape (B, 1, emb_dim)
         """
-        x = obs[:, -1, -1]  # (B, 224, 224, 3)
+        x = obs[:, -1, -1]  # (B, 224, 224, 3), eye-in-hand
         
         # Fix the permute to ensure correct channel dimension
         if x.shape[-1] == 3:  # If channels are in the last dimension
@@ -151,7 +181,7 @@ class ObsEncoder(nn.Module):
         emb = torch.clamp(emb, -10.0, 10.0)
         
         emb = emb.unsqueeze(1)  # (B, 1, emb_dim)
-        print(f"[DEBUG] Final output: shape={emb.shape}, range=[{emb.min().item():.6f}, {emb.max().item():.6f}]")
+        print(f"[DEBUG] Obs output: shape={emb.shape}, range=[{emb.min().item():.6f}, {emb.max().item():.6f}]")
 
         return emb
 
