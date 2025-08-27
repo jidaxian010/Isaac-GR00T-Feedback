@@ -181,7 +181,6 @@ class ObsEncoder(nn.Module):
         emb = torch.clamp(emb, -10.0, 10.0)
         
         emb = emb.unsqueeze(1)  # (B, 1, emb_dim)
-        print(f"[DEBUG] Obs output: shape={emb.shape}, range=[{emb.min().item():.6f}, {emb.max().item():.6f}]")
 
         return emb
 

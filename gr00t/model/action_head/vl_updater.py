@@ -206,3 +206,94 @@ class VLM_Updater(nn.Module):
             print(f"current_vlm range: [{current_vlm.min().item():.6f}, {current_vlm.max().item():.6f}]")
         
         return current_vlm
+
+############################################################################
+## 2. VLM updater, by adding
+class VLMUpdateModule(nn.Module):
+    """VLM update module using RMS normalization and learnable blending"""
+    
+    def __init__(self, obs_dim, vlm_dim, num_categories):
+        super().__init__()
+        self.obs_dim = obs_dim
+        self.vlm_dim = vlm_dim
+        self.num_categories = num_categories
+        
+        # 1) Project obs to VLM space
+        self.obs_projection = CategorySpecificLinear(num_categories, obs_dim, vlm_dim)
+        
+        # 2) Learnable blending weight α (sigmoid to bound [0,1])
+        self.alpha_logit = nn.Parameter(torch.empty(num_categories))
+        
+        # 3) Learnable target RMS for final scaling
+        self.target_rms = nn.Parameter(torch.empty(num_categories))
+        
+        self._init_weights()
+    
+    def _init_weights(self):
+        """Initialize weights for better training stability"""
+        # Initialize alpha to start around 0.85 (sigmoid(1.7) ≈ 0.85)
+        nn.init.uniform_(self.alpha_logit, 1.5, 2.0)  # sigmoid gives 0.82-0.88
+        
+        # Initialize target RMS based on typical VLM magnitude
+        nn.init.constant_(self.target_rms, 100.0)
+    
+    def rms(self, x, eps=1e-6):
+        """Compute RMS along feature dimension"""
+        return (x.pow(2).mean(dim=-1, keepdim=True) + eps).sqrt()
+    
+    def forward(self, past_vlm, obs_features, cat_ids):
+        """
+        Args:
+            past_vlm: (B, T, d) - past VLM embeddings
+            obs_features: (B, T, d_obs) - observation features
+            cat_ids: (B,) - embodiment category IDs
+        Returns:
+            updated_vlm: (B, T, d) - updated VLM embeddings
+        """
+        # NaN detection and prevention
+        if torch.isnan(past_vlm).any() or torch.isinf(past_vlm).any():
+            print("WARNING: past_vlm contains NaN/inf values! Returning original.")
+            return past_vlm
+            
+        if torch.isnan(obs_features).any() or torch.isinf(obs_features).any():
+            print("WARNING: obs_features contains NaN/inf values! Returning original past_vlm.")
+            return past_vlm
+        
+        B, T, _ = past_vlm.shape
+        
+        # 1) Project obs to VLM space FIRST
+        obs_projected = self.obs_projection(obs_features, cat_ids)  # (B, 1, vlm_dim)
+        
+        # 2) Expand obs to match past_vlm sequence length if needed
+        if obs_projected.shape[1] == 1:
+            obs_projected = obs_projected.expand(-1, T, -1)  # (B, T, vlm_dim)
+        
+        # 3) RMS normalization: past_u = past / rms(past)
+        past_u = past_vlm / self.rms(past_vlm)
+        
+        # 4) RMS normalization: obs_u = obs / rms(obs)
+        obs_u = obs_projected / self.rms(obs_projected)
+        
+        # 5) Get learnable blending weight α
+        alpha = torch.sigmoid(self.alpha_logit[cat_ids])  # (B,) in [0,1]
+        alpha = alpha.view(-1, 1, 1)  # (B, 1, 1) for broadcasting
+        
+        # 6) Blend: x = α*past_u + (1-α)*obs_u
+        x = alpha * past_u + (1 - alpha) * obs_u
+        
+        # 7) Final normalization and scaling: vlm_t = x / rms(x) * target_rms
+        x_normalized = x / self.rms(x)
+        
+        # Get target RMS for each category
+        target_rms = self.target_rms[cat_ids].view(-1, 1, 1)  # (B, 1, 1)
+        target_rms = torch.clamp(target_rms, 4.0, 200.0)
+        
+        # Final output
+        vlm_t = x_normalized * target_rms
+        
+        # Debug prints (remove in production)
+        print(f"[DEBUG] alpha: {alpha.squeeze().tolist()}")
+        print(f"[DEBUG] target_rms: {target_rms.squeeze().tolist()}")
+        print(f"[DEBUG] vlm_t range: [{vlm_t.min().item():.6f}, {vlm_t.max().item():.6f}]")
+        
+        return vlm_t

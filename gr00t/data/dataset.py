@@ -672,59 +672,6 @@ class LeRobotSingleDataset(Dataset):
             video_backend_kwargs=self.video_backend_kwargs,
         )
 
-    # def get_vlm_video(
-    #     self,
-    #     trajectory_id: int,
-    #     key: str,
-    #     base_index: int,
-    # ) -> np.ndarray:
-    #     """Get the VLM video frames anchored by grouped timesteps.
-
-    #     For groups of 4 steps, use the group's first timestep as the anchor:
-    #       - steps [0,1,2,3]  -> anchor 0
-    #       - steps [4,5,6,7]  -> anchor 4
-    #       - steps [8,9,10,11] -> anchor 8
-    #     Then retrieve frames using delta indices relative to the anchor.
-
-    #     Args:
-    #         dataset (BaseSingleDataset): The dataset to retrieve the data from.
-    #         trajectory_id (str): The ID of the trajectory.
-    #         key (str): The key of the video.
-    #         base_index (int): The base index of the trajectory.
-
-    #     Returns:
-    #         np.ndarray: The video frames for the trajectory and frame indices. Shape: (T, H, W, C)
-    #     """
-    #     # Compute anchor index for groups of 4 steps
-    #     group_size = self._vlm_group_size
-    #     anchor_index = (base_index // group_size) * group_size
-
-    #     # Get the step indices relative to the anchor
-    #     step_indices = self.delta_indices[key] + anchor_index
-    #     # Get the trajectory index
-    #     trajectory_index = self.get_trajectory_index(trajectory_id)
-    #     # Ensure the indices are within the valid range
-    #     # This is equivalent to padding the video with extra frames at the beginning and end
-    #     step_indices = np.maximum(step_indices, 0)
-    #     step_indices = np.minimum(step_indices, self.trajectory_lengths[trajectory_index] - 1)
-    #     assert key.startswith("video."), f"Video key must start with 'video.', got {key}"
-    #     # Get the sub-key
-    #     key = key.replace("video.", "")
-    #     video_path = self.get_video_path(trajectory_id, key)
-    #     # Get the action/state timestamps for each frame in the video
-    #     assert self.curr_traj_data is not None, f"No data found for {trajectory_id=}"
-    #     assert "timestamp" in self.curr_traj_data.columns, f"No timestamp found in {trajectory_id=}"
-    #     timestamp: np.ndarray = self.curr_traj_data["timestamp"].to_numpy()
-    #     # Get the corresponding video timestamps from the step indices
-    #     video_timestamp = timestamp[step_indices]
-
-    #     return get_frames_by_timestamps(
-    #         video_path.as_posix(),
-    #         video_timestamp,
-    #         video_backend=self.video_backend,
-    #         video_backend_kwargs=self.video_backend_kwargs,
-    #     )
-
     def get_vlm_video(
         self,
         trajectory_id: int,
@@ -748,8 +695,11 @@ class LeRobotSingleDataset(Dataset):
         Returns:
             np.ndarray: The video frames for the trajectory and frame indices. Shape: (T, H, W, C)
         """
+        # Compute anchor index for groups of 4 steps
+        group_size = self._vlm_group_size
+        anchor_index = (base_index // group_size) * group_size
+
         # Get the step indices relative to the anchor
-        anchor_index = max(0, base_index - 16)
         step_indices = self.delta_indices[key] + anchor_index
         # Get the trajectory index
         trajectory_index = self.get_trajectory_index(trajectory_id)
@@ -774,6 +724,55 @@ class LeRobotSingleDataset(Dataset):
             video_backend=self.video_backend,
             video_backend_kwargs=self.video_backend_kwargs,
         )
+
+    # def get_vlm_video(
+    #     self,
+    #     trajectory_id: int,
+    #     key: str,
+    #     base_index: int,
+    # ) -> np.ndarray:
+    #     """Get the VLM video frames with 16 steps back as the anchor.
+
+    #     At time t, the video frames are retrieved from the following indices:
+    #       - [t-16, t-15, ..., t-1]
+    #       - [t, t+1, ..., t+15]
+    #     The total number of frames is 32.
+
+    #     Args:
+    #         dataset (BaseSingleDataset): The dataset to retrieve the data from.
+    #         trajectory_id (str): The ID of the trajectory.
+    #         key (str): The key of the video.
+    #         base_index (int): The base index of the trajectory.
+
+    #     Returns:
+    #         np.ndarray: The video frames for the trajectory and frame indices. Shape: (T, H, W, C)
+    #     """
+    #     # Get the step indices relative to the anchor
+    #     anchor_index = max(0, base_index - 16)
+    #     step_indices = self.delta_indices[key] + anchor_index
+    #     # Get the trajectory index
+    #     trajectory_index = self.get_trajectory_index(trajectory_id)
+    #     # Ensure the indices are within the valid range
+    #     # This is equivalent to padding the video with extra frames at the beginning and end
+    #     step_indices = np.maximum(step_indices, 0)
+    #     step_indices = np.minimum(step_indices, self.trajectory_lengths[trajectory_index] - 1)
+    #     assert key.startswith("video."), f"Video key must start with 'video.', got {key}"
+    #     # Get the sub-key
+    #     key = key.replace("video.", "")
+    #     video_path = self.get_video_path(trajectory_id, key)
+    #     # Get the action/state timestamps for each frame in the video
+    #     assert self.curr_traj_data is not None, f"No data found for {trajectory_id=}"
+    #     assert "timestamp" in self.curr_traj_data.columns, f"No timestamp found in {trajectory_id=}"
+    #     timestamp: np.ndarray = self.curr_traj_data["timestamp"].to_numpy()
+    #     # Get the corresponding video timestamps from the step indices
+    #     video_timestamp = timestamp[step_indices]
+
+    #     return get_frames_by_timestamps(
+    #         video_path.as_posix(),
+    #         video_timestamp,
+    #         video_backend=self.video_backend,
+    #         video_backend_kwargs=self.video_backend_kwargs,
+    #     )
 
 
     def get_state_or_action(
