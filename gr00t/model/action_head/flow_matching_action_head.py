@@ -42,9 +42,9 @@ class CategorySpecificLinear(nn.Module):
     def forward(self, x, cat_ids):
         selected_W = self.W[cat_ids]
         selected_b = self.b[cat_ids]
-        
+
         result = torch.bmm(x, selected_W) + selected_b.unsqueeze(1)
-        
+
         return result
 
 
@@ -59,35 +59,37 @@ class CategorySpecificMLP(nn.Module):
         hidden = F.relu(self.layer1(x, cat_ids))
         return self.layer2(hidden, cat_ids)
 
+
 # # Encode state and obs together
 # class StateObsMLP(nn.Module):
 #     def __init__(self, num_categories, state_input_dim, emb_dim, output_dim):
 #         super().__init__()
 #         self.num_categories = num_categories
 #         self.obs_layer = ObsEncoder(emb_dim) # defined in obs_encoder.py
-#         self.state_layer = CategorySpecificLinear(num_categories, state_input_dim, emb_dim) # 
+#         self.state_layer = CategorySpecificLinear(num_categories, state_input_dim, emb_dim) #
 #         self.layer2 = CategorySpecificLinear(num_categories, emb_dim*2, output_dim)
 
 #     def forward(self, state, obs, cat_ids):
 #         obs_emb = self.obs_layer(obs)
 #         state_emb = F.relu(self.state_layer(state))
-#         x = torch.cat((state_emb, obs_emb), dim=1) # 
+#         x = torch.cat((state_emb, obs_emb), dim=1) #
 
 #         return self.layer2(x, cat_ids) # 1536
+
 
 # Encode state and obs together
 class StateObsMLP(nn.Module):
     def __init__(self, num_categories, state_input_dim, emb_dim, output_dim):
         super().__init__()
         self.num_categories = num_categories
-        self.obs_layer = ObsEncoder(emb_dim) # defined in obs_encoder.py
+        self.obs_layer = ObsEncoder(emb_dim)  # defined in obs_encoder.py
         self.obs_layer_mlp = CategorySpecificLinear(num_categories, emb_dim, emb_dim)
-        self.state_layer = CategorySpecificLinear(num_categories, state_input_dim, emb_dim) # 
-        self.layer2 = CategorySpecificLinear(num_categories, emb_dim*2, output_dim)
-        
+        self.state_layer = CategorySpecificLinear(num_categories, state_input_dim, emb_dim)  #
+        self.layer2 = CategorySpecificLinear(num_categories, emb_dim * 2, output_dim)
+
         # Initialize weights properly for better training stability
         self._init_weights()
-    
+
     def _init_weights(self):
         """Initialize weights for better training stability"""
         for module in self.modules():
@@ -96,32 +98,29 @@ class StateObsMLP(nn.Module):
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
             elif isinstance(module, nn.Conv2d):
-                nn.init.kaiming_normal_(module.weight, mode='fan_out', nonlinearity='relu')
+                nn.init.kaiming_normal_(module.weight, mode="fan_out", nonlinearity="relu")
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
 
     def forward(self, state, obs, cat_ids):
-
         obs_linear = (obs[:, -1, -1].float().reshape(obs.shape[0], -1)) / 255.0  # (B, 224*224*3)
-        
+
         obs_linear_512 = obs_linear[:, :512].unsqueeze(1)  # (B, 1, 512)
-        
+
         # obs_emb = self.obs_layer_mlp(obs_linear_512, cat_ids)  # (B, 1, emb_dim)
-        obs_emb = self.obs_layer(obs) # shape: (B, 1, emb_dim) using cnn
+        obs_emb = self.obs_layer(obs)  # shape: (B, 1, emb_dim) using cnn
 
         # Ensure state has the right shape for CategorySpecificLinear: (B, 1, state_dim)
         if state.dim() == 2:
             state = state.unsqueeze(1)  # (B, state_dim) -> (B, 1, state_dim)
-        
+
         state_emb = F.relu(self.state_layer(state, cat_ids))  # shape: (B, 1, emb_dim)
-        
-        x = torch.cat((state_emb, obs_emb), dim=2) # shape: (B, 1, 2*emb_dim)
 
-        output = self.layer2(x, cat_ids) # 1536
-        
+        x = torch.cat((state_emb, obs_emb), dim=2)  # shape: (B, 1, 2*emb_dim)
+
+        output = self.layer2(x, cat_ids)  # 1536
+
         return output
-
-
 
 
 class MultiEmbodimentActionEncoder(nn.Module):
@@ -152,9 +151,7 @@ class MultiEmbodimentActionEncoder(nn.Module):
             # shape (B,) => (B,T)
             timesteps = timesteps.unsqueeze(1).expand(-1, T)
         else:
-            raise ValueError(
-                "Expected `timesteps` to have shape (B,) so we can replicate across T."
-            )
+            raise ValueError("Expected `timesteps` to have shape (B,) so we can replicate across T.")
 
         # 2) Standard action MLP step for shape => (B, T, w)
         a_emb = self.W1(actions, cat_ids)
@@ -175,19 +172,11 @@ class MultiEmbodimentActionEncoder(nn.Module):
 class FlowmatchingActionHeadConfig(PretrainedConfig):
     """NOTE: N1.5 uses XEmbFlowmatchingPolicyHeadConfig as action head"""
 
-    add_pos_embed: bool = field(
-        default=True, metadata={"help": "Whether to add positional embedding"}
-    )
+    add_pos_embed: bool = field(default=True, metadata={"help": "Whether to add positional embedding"})
     model_dtype: str = field(default="float32", metadata={"help": "Model data type."})
-    diffusion_model_cfg: dict = field(
-        default=None, metadata={"help": "Diffusion model configuration."}
-    )
-    input_embedding_dim: int = field(
-        default=1536, metadata={"help": "Input embedding channel dimension."}
-    )
-    backbone_embedding_dim: int = field(
-        default=1536, metadata={"help": "Backbone embedding channel dimension."}
-    )
+    diffusion_model_cfg: dict = field(default=None, metadata={"help": "Diffusion model configuration."})
+    input_embedding_dim: int = field(default=1536, metadata={"help": "Input embedding channel dimension."})
+    backbone_embedding_dim: int = field(default=1536, metadata={"help": "Backbone embedding channel dimension."})
 
     hidden_size: int = field(default=1024, metadata={"help": "Input embedding dimension."})
     max_seq_len: int = field(default=1024, metadata={"help": "Maxium Sequence Length"})
@@ -195,9 +184,7 @@ class FlowmatchingActionHeadConfig(PretrainedConfig):
     action_horizon: int = field(default=None, metadata={"help": "Action horizon."})
     noise_beta_alpha: float = field(default=1.5, metadata={"help": ""})
     noise_beta_beta: float = field(default=1.0, metadata={"help": ""})
-    noise_s: float = field(
-        default=0.999, metadata={"help": "Flow matching noise Beta distribution s."}
-    )
+    noise_s: float = field(default=0.999, metadata={"help": "Flow matching noise Beta distribution s."})
     num_timestep_buckets: int = field(
         default=1000, metadata={"help": "Number of timestep discretization buckets."}
     )
@@ -207,9 +194,7 @@ class FlowmatchingActionHeadConfig(PretrainedConfig):
     )
     max_num_embodiments: int = field(default=32, metadata={"help": "Number of embodiments."})
     tune_projector: bool = field(default=True, metadata={"help": "Whether to tune the projector."})
-    tune_diffusion_model: bool = field(
-        default=True, metadata={"help": "Whether to tune the diffusion model."}
-    )
+    tune_diffusion_model: bool = field(default=True, metadata={"help": "Whether to tune the diffusion model."})
     load_pretrained_det_decode_layer_path: str = field(
         default=None, metadata={"help": "Path to pretrained detection model."}
     )
@@ -220,9 +205,7 @@ class FlowmatchingActionHeadConfig(PretrainedConfig):
     use_vlln: bool = field(default=True)
 
     vl_self_attention_cfg: dict = field(default=None)
-    num_target_vision_tokens: int = field(
-        default=32, metadata={"help": "Number of target vision tokens."}
-    )
+    num_target_vision_tokens: int = field(default=32, metadata={"help": "Number of target vision tokens."})
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -255,9 +238,9 @@ class FlowmatchingActionHead(nn.Module):
         )
         self.state_obs_encoder = StateObsMLP(
             num_categories=config.max_num_embodiments,
-            state_input_dim=config.max_state_dim, # 64
-            emb_dim=self.hidden_size // 2, # 1024 / 2 = 512
-            output_dim=self.input_embedding_dim, # fixed, 1536
+            state_input_dim=config.max_state_dim,  # 64
+            emb_dim=self.hidden_size // 2,  # 1024 / 2 = 512
+            output_dim=self.input_embedding_dim,  # fixed, 1536
         )
 
         self.obs_encoder = ObsEncoder(self.hidden_size // 2)
@@ -271,7 +254,15 @@ class FlowmatchingActionHead(nn.Module):
         self.vlm_update_module = VLMUpdateModule(
             obs_dim=2048,  # obs_encoder_alone output dimension
             vlm_dim=2048,  # vl_embs dimension
-            num_categories=config.max_num_embodiments
+            num_categories=config.max_num_embodiments,
+        )
+
+        # MLP to combine VLM and observation features
+        self.vlm_obs_fusion = CategorySpecificMLP(
+            num_categories=config.max_num_embodiments,
+            input_dim=2048 * 2,  # vlm_dim + obs_dim
+            hidden_dim=self.hidden_size,
+            output_dim=2048,  # output same as vlm_dim
         )
         self.action_encoder = MultiEmbodimentActionEncoder(
             action_dim=config.action_dim,
@@ -287,13 +278,9 @@ class FlowmatchingActionHead(nn.Module):
         self.future_tokens = nn.Embedding(config.num_target_vision_tokens, self.input_embedding_dim)
         nn.init.normal_(self.future_tokens.weight, mean=0.0, std=0.02)
 
-        self.vlln = (
-            nn.LayerNorm(config.backbone_embedding_dim) if config.use_vlln else nn.Identity()
-        )
+        self.vlln = nn.LayerNorm(config.backbone_embedding_dim) if config.use_vlln else nn.Identity()
         self.vl_self_attention = (
-            SelfAttentionTransformer(**config.vl_self_attention_cfg)
-            if config.use_vlln
-            else nn.Identity()
+            SelfAttentionTransformer(**config.vl_self_attention_cfg) if config.use_vlln else nn.Identity()
         )
 
         if config.add_pos_embed:
@@ -318,10 +305,12 @@ class FlowmatchingActionHead(nn.Module):
                 self.position_embedding.requires_grad_(False)
         if not tune_diffusion_model:
             self.model.requires_grad_(False)
-        
+
         # Always ensure the new state_obs_encoder is trainable (not affected by tune_projector)
         self.state_obs_encoder.requires_grad_(True)
-        
+        self.obs_encoder.requires_grad_(True)
+        self.obs_encoder_alone.requires_grad_(True)
+
         print(f"Tune action head projector: {self.tune_projector}")
         print(f"Tune action head diffusion model: {self.tune_diffusion_model}")
         print("New state_obs_encoder is always trainable (not through LoRA)")
@@ -362,7 +351,7 @@ class FlowmatchingActionHead(nn.Module):
         backbone_features = self.vl_self_attention(backbone_features)
         backbone_output["backbone_features"] = backbone_features
         return backbone_output
-    
+
     def process_ground_truth_vlm_emb(self, ground_truth_vlm_emb: torch.Tensor) -> torch.Tensor:
         """Process ground truth VLM embeddings the same way as backbone features"""
         processed = self.vlln(ground_truth_vlm_emb)
@@ -400,23 +389,24 @@ class FlowmatchingActionHead(nn.Module):
         # Get vision and language embeddings.
         vl_embs = backbone_output.backbone_features
         device = vl_embs.device
-        print(f"[DEBUG] previous vlm_embs: shape={vl_embs.shape}, range=[{vl_embs.min().item():.6f}, {vl_embs.max().item():.6f}]")
-
+        print(f"[DEBUG] previous vlm_embs: range=[{vl_embs.min().item():.6f}, {vl_embs.max().item():.6f}]")
 
         # Get embodiment ID.
         embodiment_id = action_input.embodiment_id
 
         ## Embed state.
-        state_features = self.state_encoder(action_input.state, embodiment_id) # old encoder
+        state_features = self.state_encoder(action_input.state, embodiment_id)  # old encoder
         # state_features = self.state_obs_encoder(action_input.state, action_input.simple_img, embodiment_id)
         obs_features = self.obs_encoder_alone(action_input.simple_img)  # (B, 1, 2048)
 
+        print(f"[DEBUG] obs_features: range=[{obs_features.min().item():.6f}, {obs_features.max().item():.6f}]")
+
+        # Use MLP to combine VLM and observation features
         obs_features_expanded = obs_features.expand(-1, vl_embs.shape[1], -1)  # (B, T, 2048)
-        vl_embs = obs_features_expanded + vl_embs  # (B, T, 2048)
+        combined_features = torch.cat([vl_embs, obs_features_expanded], dim=-1)  # (B, T, 4096)
+        vl_embs = self.vlm_obs_fusion(combined_features, embodiment_id)  # (B, T, 2048)
+
         # vl_embs = self.vlm_update_module(vl_embs, obs_features, embodiment_id)
-        
-        print(f"[DEBUG] Obs output: shape={obs_features.shape}, range=[{obs_features.min().item():.6f}, {obs_features.max().item():.6f}]")
-        print(f"[DEBUG] updated vlm: shape={vl_embs.shape}, range=[{vl_embs.min().item():.6f}, {vl_embs.max().item():.6f}]")
 
         # Embed noised action trajectory.
         actions = action_input.action
@@ -476,20 +466,17 @@ class FlowmatchingActionHead(nn.Module):
         # Slice out only the action portion of pred and target.
         action_mask = action_input.action_mask
 
-
         # print("pred_actions:", pred_actions)
         # print("velocity:", velocity)
         # print("action_mask:", action_mask)
         # print("loss (before reduction):", F.mse_loss(pred_actions, velocity, reduction="none"))
 
         loss = F.mse_loss(pred_actions, velocity, reduction="none") * action_mask
-        loss = loss.sum() / action_mask.sum()        
+        loss = loss.sum() / action_mask.sum()
         output_dict = {
             "loss": loss,
         }
         return BatchFeature(data=output_dict)
-
-
 
     # def forward(self, backbone_output: BatchFeature, action_input: BatchFeature, init: bool = False, ground_truth_vlm_emb: torch.Tensor = None) -> BatchFeature:
     #     """
@@ -518,7 +505,6 @@ class FlowmatchingActionHead(nn.Module):
     #             factors = tuple(factors)
     #             expanded = v.repeat(*factors)
     #             action_input[k] = expanded
-
 
     #     # Get embodiment ID.
     #     embodiment_id = action_input.embodiment_id
@@ -598,31 +584,29 @@ class FlowmatchingActionHead(nn.Module):
     #     # Slice out only the action portion of pred and target.
     #     action_mask = action_input.action_mask
 
-
-
     #     # Compute action loss with numerical stability
     #     action_loss_raw = F.mse_loss(pred_actions, velocity, reduction="none") * action_mask
     #     action_loss = action_loss_raw.sum() / (action_mask.sum() + 1e-8)  # Add epsilon for stability
-        
+
     #     # Debug action loss
     #     print(f"pred_actions range: [{pred_actions.min().item():.6f}, {pred_actions.max().item():.6f}]")
     #     print(f"velocity range: [{velocity.min().item():.6f}, {velocity.max().item():.6f}]")
-        
+
     #     # Compute VLM prediction loss (if ground truth is provided and not first step)
     #     vlm_loss = torch.tensor(0.0, device=action_loss.device, dtype=action_loss.dtype)
     #     if ground_truth_vlm_emb is not None and not init:
     #         # Process ground truth embeddings the same way as backbone features
     #         ground_truth_vlm_emb_processed = self.process_ground_truth_vlm_emb(ground_truth_vlm_emb)
-            
+
     #         # Ensure both tensors have the same sequence length
     #         min_seq_len = min(predicted_vlm_emb.shape[1], ground_truth_vlm_emb_processed.shape[1])
     #         predicted_vlm_emb_sliced = predicted_vlm_emb[:, :min_seq_len, :]
     #         ground_truth_vlm_emb_sliced = ground_truth_vlm_emb_processed[:, :min_seq_len, :]
-            
+
     #         # Add numerical stability checks
     #         print(f"predicted_vlm_emb_sliced range: [{predicted_vlm_emb_sliced.min().item():.6f}, {predicted_vlm_emb_sliced.max().item():.6f}]")
     #         print(f"ground_truth_vlm_emb_sliced range: [{ground_truth_vlm_emb_sliced.min().item():.6f}, {ground_truth_vlm_emb_sliced.max().item():.6f}]")
-            
+
     #         # Check for NaN or inf values
     #         if torch.isnan(predicted_vlm_emb_sliced).any() or torch.isinf(predicted_vlm_emb_sliced).any():
     #             print("WARNING: predicted_vlm_emb_sliced contains NaN or inf values!")
@@ -630,21 +614,20 @@ class FlowmatchingActionHead(nn.Module):
     #             print("WARNING: ground_truth_vlm_emb_sliced contains NaN or inf values!")
     #         if torch.isnan(ground_truth_vlm_emb_processed).any() or torch.isinf(ground_truth_vlm_emb_processed).any():
     #             print("WARNING: ground_truth_vlm_emb_processed contains NaN or inf values!")
-            
+
     #         vlm_loss = F.mse_loss(predicted_vlm_emb_sliced, ground_truth_vlm_emb_sliced)
     #         print(f"vlm_loss: {vlm_loss.item()}")
     #     else:
     #         print(f"VLM loss not computed - init: {init}, ground_truth_vlm_emb is None: {ground_truth_vlm_emb is None}")
-        
+
     #     # Combine losses with numerical stability
     #     total_loss = action_loss + 0.5 * vlm_loss  # Increase VLM loss weight
-        
+
     #     # Check for NaN or inf in total loss
     #     if torch.isnan(total_loss) or torch.isinf(total_loss):
     #         print("WARNING: total_loss is NaN or inf! Using fallback loss.")
     #         total_loss = torch.tensor(1.0, device=action_loss.device, dtype=action_loss.dtype, requires_grad=True)
-        
-        
+
     #     output_dict = {
     #         "loss": total_loss,
     #         "action_loss": action_loss,
@@ -655,16 +638,15 @@ class FlowmatchingActionHead(nn.Module):
     #             "total_loss": total_loss.item()
     #         }
     #     }
-        
+
     #     # Add the updated VLM embeddings to the output for reuse
     #     if not init:
     #         output_dict["updated_vlm_emb"] = predicted_vlm_emb
-            
+
     #     return BatchFeature(data=output_dict)
 
     @torch.no_grad()
     def get_action(self, backbone_output: BatchFeature, action_input: BatchFeature) -> BatchFeature:
-
         backbone_output = self.process_backbone_output(backbone_output)
 
         # Get vision and language embeddings.
@@ -693,9 +675,7 @@ class FlowmatchingActionHead(nn.Module):
             t_discretized = int(t_cont * self.num_timestep_buckets)
 
             # Embed noised action trajectory.
-            timesteps_tensor = torch.full(
-                size=(batch_size,), fill_value=t_discretized, device=device
-            )
+            timesteps_tensor = torch.full(size=(batch_size,), fill_value=t_discretized, device=device)
             action_features = self.action_encoder(actions, timesteps_tensor, embodiment_id)
             # Maybe add position embedding.
             if self.config.add_pos_embed:

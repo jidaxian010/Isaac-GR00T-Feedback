@@ -45,9 +45,7 @@ def formalize_language(language: str) -> str:
 
 
 def build_eagle_processor(eagle_path: str) -> ProcessorMixin:
-    eagle_processor = AutoProcessor.from_pretrained(
-        eagle_path, trust_remote_code=True, use_fast=True
-    )
+    eagle_processor = AutoProcessor.from_pretrained(eagle_path, trust_remote_code=True, use_fast=True)
     eagle_processor.tokenizer.padding_side = "left"
     return eagle_processor
 
@@ -67,9 +65,7 @@ def collate(features: List[dict], eagle_processor) -> dict:
                 curr_image_inputs = v["image_inputs"]
                 text_list += curr_text_list
                 image_inputs += curr_image_inputs
-            eagle_inputs = eagle_processor(
-                text=text_list, images=image_inputs, return_tensors="pt", padding=True
-            )
+            eagle_inputs = eagle_processor(text=text_list, images=image_inputs, return_tensors="pt", padding=True)
             for k, v in eagle_inputs.items():
                 k = "eagle_" + k
                 batch[k] = v
@@ -93,14 +89,11 @@ class DefaultDataCollator(DataCollatorMixin):
 
 
 class GR00TTransform(InvertibleModalityTransform):
-
     # -- We inherit from ModalityTransform, so we keep apply_to as well --
     apply_to: list[str] = Field(
         default_factory=list, description="Not used in this transform, kept for compatibility."
     )
-    training: bool = Field(
-        default=True, description="Whether to apply the transform in training mode."
-    )
+    training: bool = Field(default=True, description="Whether to apply the transform in training mode.")
     formalize_language: bool = Field(default=False, description="Formalize language if True.")
     embodiment_tag_mapping: dict[str, int] = Field(
         description="The projector index of each embodiment tag.",
@@ -133,9 +126,7 @@ class GR00TTransform(InvertibleModalityTransform):
 
     def get_embodiment_tag(self) -> int:
         """Get the embodiment tag from the data."""
-        assert (
-            self.embodiment_tag is not None
-        ), "Embodiment tag not set. Please call set_metadata first."
+        assert self.embodiment_tag is not None, "Embodiment tag not set. Please call set_metadata first."
         return self.embodiment_tag_mapping[self.embodiment_tag.value]
 
     def check_keys_and_batch_size(self, data):
@@ -187,6 +178,7 @@ class GR00TTransform(InvertibleModalityTransform):
         lang = batch["language"]
         if isinstance(lang, list):
             lang = lang[0]
+
         text_content.append({"type": "text", "text": lang})
 
         eagle_images = [Image.fromarray(np.transpose(v, (1, 2, 0))) for v in np_images]
@@ -203,6 +195,7 @@ class GR00TTransform(InvertibleModalityTransform):
                 eagle_conversation, tokenize=False, add_generation_prompt=True
             )
         ]
+
         image_inputs, video_inputs = self.eagle_processor.process_vision_info(eagle_conversation)
         eagle_content = {
             "image_inputs": image_inputs,
@@ -235,6 +228,7 @@ class GR00TTransform(InvertibleModalityTransform):
                     raw_language = self.default_instruction
         else:
             raw_language = self.default_instruction
+
         return raw_language
 
     def _prepare_state(self, data: dict):
@@ -285,9 +279,9 @@ class GR00TTransform(InvertibleModalityTransform):
         n_action_tokens = actions.shape[0]  # T
         n_action_dims = actions.shape[1]
 
-        assert (
-            n_action_dims <= self.max_action_dim
-        ), f"Action dim {n_action_dims} exceeds max allowed {self.max_action_dim}."
+        assert n_action_dims <= self.max_action_dim, (
+            f"Action dim {n_action_dims} exceeds max allowed {self.max_action_dim}."
+        )
 
         # Pad the channel dimension
         actions = np.pad(actions, ((0, 0), (0, self.max_action_dim - n_action_dims)), "constant")
@@ -335,8 +329,7 @@ class GR00TTransform(InvertibleModalityTransform):
         if self.training:
             action_and_mask_keys = ["action", "action_mask"]
             assert all(
-                transformed_data[key].shape == transformed_data["action"].shape
-                for key in action_and_mask_keys
+                transformed_data[key].shape == transformed_data["action"].shape for key in action_and_mask_keys
             ), f"Shape mismatch: {[(key, transformed_data[key].shape) for key in action_and_mask_keys]}"
 
         return transformed_data

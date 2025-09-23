@@ -83,10 +83,10 @@ class ArgsConfig:
     tune_visual: bool = False
     """Whether to fine-tune the vision tower."""
 
-    tune_projector: bool = False
+    tune_projector: bool = True
     """Whether to fine-tune the projector."""
 
-    tune_diffusion_model: bool = False
+    tune_diffusion_model: bool = True
     """Whether to fine-tune the diffusion model."""
 
     resume: bool = False
