@@ -163,6 +163,7 @@ class LeRobotSingleDataset(Dataset):
         self.is_anchored = is_anchored
         self.curr_traj_data = None
         self.curr_traj_id = None
+        self._last_vlm_lookback_n = None  # Store the last used n value
 
         # Check if the dataset is valid
         self._check_integrity()
@@ -506,13 +507,20 @@ class LeRobotSingleDataset(Dataset):
         data = {}
         # Get the data for all modalities
         self.curr_traj_data = self.get_trajectory_data(trajectory_id)
+        
+        # Store the random lookback value for VLM video
+        vlm_lookback_n = None
+        
         for modality in self.modality_keys:
             for key in self.modality_keys[modality]:
                 if modality == "video" and key.startswith("video."):
-                    # VLM data - use anchored (16 steps back)
+                    # VLM data - use anchored (random lookback)
                     data[key] = self.get_data_by_modality(
                         trajectory_id, modality, key, base_index, is_anchored=True
                     )
+                    # Store the n value used for this video
+                    if vlm_lookback_n is None:  # Only set once per step
+                        vlm_lookback_n = self._get_last_vlm_lookback_n()
                     # ALWAYS create obs.* keys with current timestep
                     obs_key = key.replace("video.", "obs.")
                     data[obs_key] = self.get_video(trajectory_id, key, base_index)
@@ -521,8 +529,16 @@ class LeRobotSingleDataset(Dataset):
                     data[key] = self.get_data_by_modality(
                         trajectory_id, modality, key, base_index, is_anchored=False
                     )
+        
+        # Add the VLM lookback value to the data
+        if vlm_lookback_n is not None:
+            data["vlm_lookback_n"] = vlm_lookback_n
 
         return data
+
+    def _get_last_vlm_lookback_n(self) -> int:
+        """Get the last used VLM lookback n value."""
+        return self._last_vlm_lookback_n if self._last_vlm_lookback_n is not None else 0
 
     def get_trajectory_data(self, trajectory_id: int) -> pd.DataFrame:
         """Get the data for a trajectory."""
@@ -680,6 +696,12 @@ class LeRobotSingleDataset(Dataset):
         lookback_steps = [0, 8, 16, 24]
         n = np.random.choice(lookback_steps)
         anchor_index = max(0, base_index - n)
+        
+        # DEBUG: Print choice of n to verify random anchoring
+        print(f"[VLM DEBUG] trajectory_id={trajectory_id}, base_index={base_index}, chosen_n={n}, anchor_index={anchor_index}")
+        
+        # Store the n value for later retrieval
+        self._last_vlm_lookback_n = n
 
         # Get the step indices relative to the anchor
         step_indices = self.delta_indices[key] + anchor_index
@@ -891,6 +913,10 @@ class LeRobotSingleDataset(Dataset):
         lookback_steps = [0, 8, 16, 24]
         n = np.random.choice(lookback_steps)
         anchor_index = max(0, base_index - n)
+        
+        # DEBUG: Print choice of n to verify random anchoring for language
+        print(f"[VLM LANGUAGE DEBUG] trajectory_id={trajectory_id}, base_index={base_index}, chosen_n={n}, anchor_index={anchor_index}")
+        
         # Get the step indices relative to the anchor
         step_indices = self.delta_indices[key] + anchor_index
         # Get the trajectory index

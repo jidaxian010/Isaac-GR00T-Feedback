@@ -394,18 +394,19 @@ class FlowmatchingActionHead(nn.Module):
         # Get embodiment ID.
         embodiment_id = action_input.embodiment_id
 
-        ## Embed state.
         state_features = self.state_encoder(action_input.state, embodiment_id)  # old encoder
-        # state_features = self.state_obs_encoder(action_input.state, action_input.simple_img, embodiment_id)
         obs_features = self.obs_encoder_alone(action_input.simple_img)  # (B, 1, 2048)
-
         print(f"[DEBUG] obs_features: range=[{obs_features.min().item():.6f}, {obs_features.max().item():.6f}]")
 
-        # Use MLP to combine VLM and observation features
+        ################### mlp fusion ###################
         obs_features_expanded = obs_features.expand(-1, vl_embs.shape[1], -1)  # (B, T, 2048)
         combined_features = torch.cat([vl_embs, obs_features_expanded], dim=-1)  # (B, T, 4096)
-        vl_embs = self.vlm_obs_fusion(combined_features, embodiment_id)  # (B, T, 2048)
+        delta_vlm_embs = self.vlm_obs_fusion(combined_features, embodiment_id)  # (B, T, 2048)
+        vl_embs = vl_embs + delta_vlm_embs
 
+
+        ################### vlm update ###################
+        # state_features = self.state_obs_encoder(action_input.state, action_input.simple_img, embodiment_id)
         # vl_embs = self.vlm_update_module(vl_embs, obs_features, embodiment_id)
 
         # Embed noised action trajectory.
@@ -653,9 +654,13 @@ class FlowmatchingActionHead(nn.Module):
         vl_embs = backbone_output.backbone_features
         embodiment_id = action_input.embodiment_id
 
-        # Embed state.
-        state_features = self.state_encoder(action_input.state, embodiment_id)
-        # state_features = self.state_obs_encoder(action_input.state, action_input.simple_img, embodiment_id)
+        state_features = self.state_encoder(action_input.state, embodiment_id)  # old encoder
+        obs_features = self.obs_encoder_alone(action_input.simple_img)  # (B, 1, 2048)
+
+        ################### mlp fusion ###################
+        obs_features_expanded = obs_features.expand(-1, vl_embs.shape[1], -1)  # (B, T, 2048)
+        combined_features = torch.cat([vl_embs, obs_features_expanded], dim=-1)  # (B, T, 4096)
+        vl_embs = self.vlm_obs_fusion(combined_features, embodiment_id)  # (B, T, 2048)
 
         # Set initial actions as the sampled noise.
         batch_size = vl_embs.shape[0]

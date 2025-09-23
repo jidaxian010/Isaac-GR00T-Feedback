@@ -325,6 +325,10 @@ class GR00TTransform(InvertibleModalityTransform):
             transformed_data[k] = v
 
         transformed_data["embodiment_id"] = self.get_embodiment_tag()
+        
+        # Pass through VLM lookback n value if present
+        if "vlm_lookback_n" in data:
+            transformed_data["vlm_lookback_n"] = data["vlm_lookback_n"]
 
         if self.training:
             action_and_mask_keys = ["action", "action_mask"]
