@@ -257,10 +257,10 @@ class FlowmatchingActionHead(nn.Module):
             num_categories=config.max_num_embodiments,
         )
 
-        # MLP to combine VLM and observation features
+        # MLP to combine VLM and observation features (including lookback_n)
         self.vlm_obs_fusion = CategorySpecificMLP(
             num_categories=config.max_num_embodiments,
-            input_dim=2048 * 2,  # vlm_dim + obs_dim
+            input_dim=2048 * 2 + 1,  # vlm_dim + obs_dim + lookback_n
             hidden_dim=self.hidden_size,
             output_dim=2048,  # output same as vlm_dim
         )
@@ -396,14 +396,27 @@ class FlowmatchingActionHead(nn.Module):
 
         state_features = self.state_encoder(action_input.state, embodiment_id)  # old encoder
         obs_features = self.obs_encoder_alone(action_input.simple_img)  # (B, 1, 2048)
+        lookback_n = action_input.lookback_n  # Get VLM lookback n value
         print(f"[DEBUG] obs_features: range=[{obs_features.min().item():.6f}, {obs_features.max().item():.6f}]")
+        # print(f"[DEBUG] VLM lookback_n: {lookback_n}")
 
         ################### mlp fusion ###################
         obs_features_expanded = obs_features.expand(-1, vl_embs.shape[1], -1)  # (B, T, 2048)
-        combined_features = torch.cat([vl_embs, obs_features_expanded], dim=-1)  # (B, T, 4096)
+
+        # Normalize lookback_n to [0, 1] range for better training stability
+        lookback_n_normalized = lookback_n.float() / 24.0  # [0, 8, 16, 24] -> [0, 0.33, 0.67, 1.0]
+        lookback_n_expanded = (
+            lookback_n_normalized.unsqueeze(1).unsqueeze(2).expand(-1, vl_embs.shape[1], 1)
+        )  # (B, T, 1)
+
+        combined_features = torch.cat(
+            [vl_embs, obs_features_expanded, lookback_n_expanded], dim=-1
+        )  # (B, T, 4097)
         delta_vlm_embs = self.vlm_obs_fusion(combined_features, embodiment_id)  # (B, T, 2048)
         vl_embs = vl_embs + delta_vlm_embs
-
+        print(
+            f"[DEBUG] delta_vlm_embs: range=[{delta_vlm_embs.min().item():.6f}, {delta_vlm_embs.max().item():.6f}]"
+        )
 
         ################### vlm update ###################
         # state_features = self.state_obs_encoder(action_input.state, action_input.simple_img, embodiment_id)
@@ -656,10 +669,20 @@ class FlowmatchingActionHead(nn.Module):
 
         state_features = self.state_encoder(action_input.state, embodiment_id)  # old encoder
         obs_features = self.obs_encoder_alone(action_input.simple_img)  # (B, 1, 2048)
+        lookback_n = action_input.lookback_n  # Get VLM lookback n value
 
         ################### mlp fusion ###################
         obs_features_expanded = obs_features.expand(-1, vl_embs.shape[1], -1)  # (B, T, 2048)
-        combined_features = torch.cat([vl_embs, obs_features_expanded], dim=-1)  # (B, T, 4096)
+
+        # Normalize lookback_n to [0, 1] range for better training stability
+        lookback_n_normalized = lookback_n.float() / 24.0  # [0, 8, 16, 24] -> [0, 0.33, 0.67, 1.0]
+        lookback_n_expanded = (
+            lookback_n_normalized.unsqueeze(1).unsqueeze(2).expand(-1, vl_embs.shape[1], 1)
+        )  # (B, T, 1)
+
+        combined_features = torch.cat(
+            [vl_embs, obs_features_expanded, lookback_n_expanded], dim=-1
+        )  # (B, T, 4097)
         vl_embs = self.vlm_obs_fusion(combined_features, embodiment_id)  # (B, T, 2048)
 
         # Set initial actions as the sampled noise.

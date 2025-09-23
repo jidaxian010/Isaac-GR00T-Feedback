@@ -507,10 +507,10 @@ class LeRobotSingleDataset(Dataset):
         data = {}
         # Get the data for all modalities
         self.curr_traj_data = self.get_trajectory_data(trajectory_id)
-        
+
         # Store the random lookback value for VLM video
         vlm_lookback_n = None
-        
+
         for modality in self.modality_keys:
             for key in self.modality_keys[modality]:
                 if modality == "video" and key.startswith("video."):
@@ -529,7 +529,7 @@ class LeRobotSingleDataset(Dataset):
                     data[key] = self.get_data_by_modality(
                         trajectory_id, modality, key, base_index, is_anchored=False
                     )
-        
+
         # Add the VLM lookback value to the data
         if vlm_lookback_n is not None:
             data["vlm_lookback_n"] = vlm_lookback_n
@@ -696,10 +696,7 @@ class LeRobotSingleDataset(Dataset):
         lookback_steps = [0, 8, 16, 24]
         n = np.random.choice(lookback_steps)
         anchor_index = max(0, base_index - n)
-        
-        # DEBUG: Print choice of n to verify random anchoring
-        print(f"[VLM DEBUG] trajectory_id={trajectory_id}, base_index={base_index}, chosen_n={n}, anchor_index={anchor_index}")
-        
+
         # Store the n value for later retrieval
         self._last_vlm_lookback_n = n
 
@@ -913,10 +910,7 @@ class LeRobotSingleDataset(Dataset):
         lookback_steps = [0, 8, 16, 24]
         n = np.random.choice(lookback_steps)
         anchor_index = max(0, base_index - n)
-        
-        # DEBUG: Print choice of n to verify random anchoring for language
-        print(f"[VLM LANGUAGE DEBUG] trajectory_id={trajectory_id}, base_index={base_index}, chosen_n={n}, anchor_index={anchor_index}")
-        
+
         # Get the step indices relative to the anchor
         step_indices = self.delta_indices[key] + anchor_index
         # Get the trajectory index

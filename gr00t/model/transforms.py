@@ -311,6 +311,12 @@ class GR00TTransform(InvertibleModalityTransform):
         simple_img = data["obs"]
         transformed_data["simple_img"] = simple_img
 
+        # 2.6) Prepare VLM lookback n value
+        if "vlm_lookback_n" in data:
+            transformed_data["lookback_n"] = data["vlm_lookback_n"]
+        else:
+            raise ValueError("VLM lookback n value not found in data.")
+
         if self.training:
             # 3) Prepare actions
             transformed_data["segmentation_target"] = np.zeros((2,))
@@ -325,7 +331,7 @@ class GR00TTransform(InvertibleModalityTransform):
             transformed_data[k] = v
 
         transformed_data["embodiment_id"] = self.get_embodiment_tag()
-        
+
         # Pass through VLM lookback n value if present
         if "vlm_lookback_n" in data:
             transformed_data["vlm_lookback_n"] = data["vlm_lookback_n"]
