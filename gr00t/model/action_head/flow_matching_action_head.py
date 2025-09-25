@@ -412,7 +412,8 @@ class FlowmatchingActionHead(nn.Module):
         combined_features = torch.cat(
             [vl_embs, obs_features_expanded, lookback_n_expanded], dim=-1
         )  # (B, T, 4097)
-        vl_embs = self.vlm_obs_fusion(combined_features, embodiment_id)  # (B, T, 2048)
+        delta_vlm_embs = self.vlm_obs_fusion(combined_features, embodiment_id)  # (B, T, 2048)
+        vl_embs = vl_embs + delta_vlm_embs
 
         ################### vlm update ###################
         # state_features = self.state_obs_encoder(action_input.state, action_input.simple_img, embodiment_id)
@@ -679,7 +680,8 @@ class FlowmatchingActionHead(nn.Module):
         combined_features = torch.cat(
             [vl_embs, obs_features_expanded, lookback_n_expanded], dim=-1
         )  # (B, T, 4097)
-        vl_embs = self.vlm_obs_fusion(combined_features, embodiment_id)  # (B, T, 2048)
+        delta_vlm_embs = self.vlm_obs_fusion(combined_features, embodiment_id)  # (B, T, 2048)
+        vl_embs = vl_embs + delta_vlm_embs
 
         # Set initial actions as the sampled noise.
         batch_size = vl_embs.shape[0]
