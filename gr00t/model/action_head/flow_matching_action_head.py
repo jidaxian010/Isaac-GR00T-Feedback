@@ -36,7 +36,10 @@ class CategorySpecificLinear(nn.Module):
     def __init__(self, num_categories, input_dim, hidden_dim):
         super().__init__()
         self.num_categories = num_categories
-        self.W = nn.Parameter(0.02 * torch.randn(num_categories, input_dim, hidden_dim))
+
+        # Use Xavier/Glorot initialization for better gradient flow
+        init_scale = (2.0 / (input_dim + hidden_dim)) ** 0.5
+        self.W = nn.Parameter(init_scale * torch.randn(num_categories, input_dim, hidden_dim))
         self.b = nn.Parameter(torch.zeros(num_categories, hidden_dim))
 
     def forward(self, x, cat_ids):
@@ -257,13 +260,18 @@ class FlowmatchingActionHead(nn.Module):
             num_categories=config.max_num_embodiments,
         )
 
-        # MLP to combine VLM and observation features (including lookback_n)
+        # Improved VLM-observation fusion with residual connections
         self.vlm_obs_fusion = CategorySpecificMLP(
             num_categories=config.max_num_embodiments,
             input_dim=2048 * 2 + 1,  # vlm_dim + obs_dim + lookback_n
             hidden_dim=self.hidden_size,
             output_dim=2048,  # output same as vlm_dim
         )
+
+        # Add VLM normalization for stable training
+        self.vlm_layer_norm = nn.LayerNorm(2048)
+
+        # Removed fusion_scale - MLP can learn appropriate output scale directly
         self.action_encoder = MultiEmbodimentActionEncoder(
             action_dim=config.action_dim,
             hidden_size=self.input_embedding_dim,
@@ -398,22 +406,48 @@ class FlowmatchingActionHead(nn.Module):
         obs_features = self.obs_encoder_alone(action_input.simple_img)  # (B, 1, 2048)
         lookback_n = action_input.lookback_n  # Get VLM lookback n value
         print(f"[DEBUG] obs_features: range=[{obs_features.min().item():.6f}, {obs_features.max().item():.6f}]")
-        # print(f"[DEBUG] VLM lookback_n: {lookback_n}")
+        print(f"[DEBUG] VLM lookback_n: {lookback_n}")
 
-        ################### mlp fusion ###################
-        obs_features_expanded = obs_features.expand(-1, vl_embs.shape[1], -1)  # (B, T, 2048)
+        ################### improved mlp fusion with proper normalization ###################
+        # Normalize VLM embeddings to [-1, 1] range using robust normalization
+        vl_embs_mean = vl_embs.mean(dim=-1, keepdim=True)
+        vl_embs_std = vl_embs.std(dim=-1, keepdim=True) + 1e-8
+        vl_embs_normalized = torch.clamp((vl_embs - vl_embs_mean) / vl_embs_std, min=-3.0, max=3.0)
 
-        # Normalize lookback_n to [0, 1] range for better training stability
-        lookback_n_normalized = lookback_n.float() / 24.0  # [0, 8, 16, 24] -> [0, 0.33, 0.67, 1.0]
+        # Normalize observation features to [-1, 1] range to match VLM scale
+        obs_features_mean = obs_features.mean(dim=-1, keepdim=True)
+        obs_features_std = obs_features.std(dim=-1, keepdim=True) + 1e-8
+        obs_features_normalized = torch.clamp(
+            (obs_features - obs_features_mean) / obs_features_std, min=-3.0, max=3.0
+        )
+
+        print(
+            f"[DEBUG] vl_embs_normalized: range=[{vl_embs_normalized.min().item():.6f}, {vl_embs_normalized.max().item():.6f}]"
+        )
+        print(
+            f"[DEBUG] obs_features_normalized: range=[{obs_features_normalized.min().item():.6f}, {obs_features_normalized.max().item():.6f}]"
+        )
+
+        obs_features_expanded = obs_features_normalized.expand(-1, vl_embs.shape[1], -1)  # (B, T, 2048)
+
+        # Normalize lookback_n to [-1, 1] range to match other inputs
+        lookback_n_normalized = (lookback_n.float() / 24.0) * 2.0 - 1.0  # [0, 8, 16, 24] -> [-1, -0.33, 0.33, 1]
         lookback_n_expanded = (
             lookback_n_normalized.unsqueeze(1).unsqueeze(2).expand(-1, vl_embs.shape[1], 1)
         )  # (B, T, 1)
 
         combined_features = torch.cat(
-            [vl_embs, obs_features_expanded, lookback_n_expanded], dim=-1
+            [vl_embs_normalized, obs_features_expanded, lookback_n_expanded], dim=-1
         )  # (B, T, 4097)
+
+        # Learn residual updates instead of replacing entire embedding
         delta_vlm_embs = self.vlm_obs_fusion(combined_features, embodiment_id)  # (B, T, 2048)
-        vl_embs = vl_embs + delta_vlm_embs
+
+        vl_embs = vl_embs + delta_vlm_embs  # Direct residual connection
+
+        print(
+            f"[DEBUG] delta_vlm_embs: range=[{delta_vlm_embs.min().item():.6f}, {delta_vlm_embs.max().item():.6f}]"
+        )
 
         ################### vlm update ###################
         # state_features = self.state_obs_encoder(action_input.state, action_input.simple_img, embodiment_id)
@@ -668,20 +702,35 @@ class FlowmatchingActionHead(nn.Module):
         obs_features = self.obs_encoder_alone(action_input.simple_img)  # (B, 1, 2048)
         lookback_n = action_input.lookback_n  # Get VLM lookback n value
 
-        ################### mlp fusion ###################
-        obs_features_expanded = obs_features.expand(-1, vl_embs.shape[1], -1)  # (B, T, 2048)
+        ################### improved mlp fusion with proper normalization ###################
+        # Normalize VLM embeddings to [-3, 3] range using robust normalization
+        vl_embs_mean = vl_embs.mean(dim=-1, keepdim=True)
+        vl_embs_std = vl_embs.std(dim=-1, keepdim=True) + 1e-8
+        vl_embs_normalized = torch.clamp((vl_embs - vl_embs_mean) / vl_embs_std, min=-3.0, max=3.0)
 
-        # Normalize lookback_n to [0, 1] range for better training stability
-        lookback_n_normalized = lookback_n.float() / 24.0  # [0, 8, 16, 24] -> [0, 0.33, 0.67, 1.0]
+        # Normalize observation features to [-3, 3] range to match VLM scale
+        obs_features_mean = obs_features.mean(dim=-1, keepdim=True)
+        obs_features_std = obs_features.std(dim=-1, keepdim=True) + 1e-8
+        obs_features_normalized = torch.clamp(
+            (obs_features - obs_features_mean) / obs_features_std, min=-3.0, max=3.0
+        )
+
+        obs_features_expanded = obs_features_normalized.expand(-1, vl_embs.shape[1], -1)  # (B, T, 2048)
+
+        # Normalize lookback_n to [-1, 1] range to match other inputs
+        lookback_n_normalized = (lookback_n.float() / 24.0) * 2.0 - 1.0  # [0, 8, 16, 24] -> [-1, -0.33, 0.33, 1]
         lookback_n_expanded = (
             lookback_n_normalized.unsqueeze(1).unsqueeze(2).expand(-1, vl_embs.shape[1], 1)
         )  # (B, T, 1)
 
         combined_features = torch.cat(
-            [vl_embs, obs_features_expanded, lookback_n_expanded], dim=-1
+            [vl_embs_normalized, obs_features_expanded, lookback_n_expanded], dim=-1
         )  # (B, T, 4097)
+
+        # Learn residual updates instead of replacing entire embedding
         delta_vlm_embs = self.vlm_obs_fusion(combined_features, embodiment_id)  # (B, T, 2048)
-        vl_embs = vl_embs + delta_vlm_embs
+
+        vl_embs = vl_embs + delta_vlm_embs  # Direct residual connection
 
         # Set initial actions as the sampled noise.
         batch_size = vl_embs.shape[0]

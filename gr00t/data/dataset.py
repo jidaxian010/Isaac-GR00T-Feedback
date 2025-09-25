@@ -693,8 +693,7 @@ class LeRobotSingleDataset(Dataset):
             np.ndarray: The video frames for the trajectory and frame indices. Shape: (T, H, W, C)
         """
         # Randomly choose anchor lookback from [0, 8, 16, 24]
-        # lookback_steps = [0, 8, 16, 24]
-        lookback_steps = [16]
+        lookback_steps = [0, 8, 16, 24]
         n = np.random.choice(lookback_steps)
         anchor_index = max(0, base_index - n)
 
