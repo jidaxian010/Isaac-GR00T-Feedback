@@ -508,31 +508,35 @@ class LeRobotSingleDataset(Dataset):
         # Get the data for all modalities
         self.curr_traj_data = self.get_trajectory_data(trajectory_id)
 
-        # Store the random lookback value for VLM video
-        vlm_lookback_n = None
-
-        for modality in self.modality_keys:
+        for modality in self.modality_keys:  # ["video", "state", "action", "language"]
             for key in self.modality_keys[modality]:
-                if modality == "video" and key.startswith("video."):
-                    # VLM data - use anchored (random lookback)
-                    data[key] = self.get_data_by_modality(
-                        trajectory_id, modality, key, base_index, is_anchored=True
-                    )
-                    # Store the n value used for this video
-                    if vlm_lookback_n is None:  # Only set once per step
-                        vlm_lookback_n = self._get_last_vlm_lookback_n()
-                    # ALWAYS create obs.* keys with current timestep
-                    obs_key = key.replace("video.", "obs.")
-                    data[obs_key] = self.get_video(trajectory_id, key, base_index)
+                if modality == "video":
+                    # Handle video keys based on camera type
+                    if key == "video.agentview_rgb":
+                        # VLM data - use anchored lookback for agentview_rgb
+                        data[key] = self.get_data_by_modality(
+                            trajectory_id, modality, key, base_index, is_anchored=True
+                        )
+                    elif key == "video.eye_in_hand_rgb":
+                        # Observation data - use current timestep for eye_in_hand_rgb
+                        data[key] = self.get_data_by_modality(
+                            trajectory_id, modality, key, base_index, is_anchored=False
+                        )
+                    else:
+                        # Default to current timestep
+                        data[key] = self.get_data_by_modality(
+                            trajectory_id, modality, key, base_index, is_anchored=False
+                        )
                 else:
                     # Non-video data - use current timestep
                     data[key] = self.get_data_by_modality(
                         trajectory_id, modality, key, base_index, is_anchored=False
                     )
 
-        # Add the VLM lookback value to the data
-        if vlm_lookback_n is not None:
-            data["vlm_lookback_n"] = vlm_lookback_n
+        # Create obs keys by copying from video keys (for observation encoder)
+        obs_keys = [k.replace("video.", "obs.") for k in self.modality_keys["video"]]
+        for obs_key, video_key in zip(obs_keys, self.modality_keys["video"]):
+            data[obs_key] = data[video_key]  # Copy the video data to obs key
 
         return data
 
@@ -958,11 +962,8 @@ class LeRobotSingleDataset(Dataset):
             base_index (int): The base index of the trajectory.
         """
         if is_anchored:
-            # print(f"Getting anchored data for {modality} {key} {base_index}")
             if modality == "video":
                 return self.get_vlm_video(trajectory_id, key, base_index)
-            elif modality == "obs":
-                return self.get_video(trajectory_id, key, base_index)
             elif modality == "state" or modality == "action":
                 return self.get_state_or_action(trajectory_id, modality, key, base_index)
             elif modality == "language":
@@ -971,8 +972,6 @@ class LeRobotSingleDataset(Dataset):
                 raise ValueError(f"Invalid modality: {modality}")
         else:
             if modality == "video":
-                return self.get_video(trajectory_id, key, base_index)
-            elif modality == "obs":
                 return self.get_video(trajectory_id, key, base_index)
             elif modality == "state" or modality == "action":
                 return self.get_state_or_action(trajectory_id, modality, key, base_index)

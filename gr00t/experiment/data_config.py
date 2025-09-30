@@ -886,8 +886,9 @@ class AgibotGenie1DataConfig:
 
 ###########################################################################################
 
-class PandaHandDataConfig(BaseDataConfig): # libero panda hand 
-    video_keys = ["video.agentview_rgb", "video.eye_in_hand_rgb"]
+
+class PandaHandDataConfig(BaseDataConfig):  # libero panda hand
+    video_keys = ["video.agentview_rgb", "video.eye_in_hand_rgb"]  # Both cameras in video modality
     state_keys = [
         "state.ee_pos",
         "state.ee_ori",
@@ -906,6 +907,7 @@ class PandaHandDataConfig(BaseDataConfig): # libero panda hand
             delta_indices=self.observation_indices,
             modality_keys=self.video_keys,
         )
+
         state_modality = ModalityConfig(
             delta_indices=self.observation_indices,
             modality_keys=self.state_keys,
@@ -927,12 +929,12 @@ class PandaHandDataConfig(BaseDataConfig): # libero panda hand
         return modality_configs
 
     def transform(self):
-        # Mirror video keys to create non-anchored observation keys
+        # Mirror video keys to create obs keys for observation encoder
         obs_keys = [k.replace("video.", "obs.") for k in self.video_keys]
         all_video_like_keys = self.video_keys + obs_keys
 
         transforms = [
-            # video transforms (apply to both anchored video.* and non-anchored obs.*)
+            # video transforms (apply to both video.* and obs.*)
             VideoToTensor(apply_to=all_video_like_keys),
             VideoCrop(apply_to=all_video_like_keys, scale=0.95),
             VideoResize(apply_to=all_video_like_keys, height=224, width=224, interpolation="linear"),
