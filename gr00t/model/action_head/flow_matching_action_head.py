@@ -267,6 +267,9 @@ class FlowmatchingActionHead(nn.Module):
         # Add normalization for stable training
         self.vlm_layer_norm = nn.LayerNorm(2048)
 
+        # Fixed scale factor for residual magnitude control
+        self.alpha = 0.25  # Fixed moderate updates
+
         # Removed fusion_scale - MLP can learn appropriate output scale directly
         self.action_encoder = MultiEmbodimentActionEncoder(
             action_dim=config.action_dim,
@@ -425,7 +428,10 @@ class FlowmatchingActionHead(nn.Module):
 
         # Learn residual updates instead of replacing entire embedding
         vlm_residual = self.vlm_obs_fusion(combined_features, embodiment_id)  # (B, T, 2048)
-        vl_embs = vl_embs + vlm_residual  # Residual connection: original + learned update
+
+        # Apply fixed alpha scaling
+        vl_embs = vl_embs + self.alpha * vlm_residual  # Residual connection: original + scaled update
+        print(f"[DEBUG] alpha: {self.alpha}")
         print(f"[DEBUG] updated vl_embs: range=[{vl_embs.min().item():.6f}, {vl_embs.max().item():.6f}]")
 
         ################### vlm update ###################
@@ -699,7 +705,9 @@ class FlowmatchingActionHead(nn.Module):
 
         # Learn residual updates instead of replacing entire embedding
         vlm_residual = self.vlm_obs_fusion(combined_features, embodiment_id)  # (B, T, 2048)
-        vl_embs = vl_embs + vlm_residual  # Residual connection: original + learned update
+
+        # Apply fixed alpha scaling
+        vl_embs = vl_embs + self.alpha * vlm_residual  # Residual connection: original + scaled update
 
         # Set initial actions as the sampled noise.
         batch_size = vl_embs.shape[0]
