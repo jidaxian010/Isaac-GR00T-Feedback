@@ -243,7 +243,7 @@ class FlowmatchingActionHead(nn.Module):
         )
 
         self.obs_encoder = ObsEncoder(self.hidden_size // 2)
-        self.obs_encoder_alone = ObsEncoder(emb_dim=2048)  # Match Eagle backbone output dimension
+        self.obs_encoder_alone = ObsEncoder(emb_dim=self.input_embedding_dim)  # Direct 1536 output
 
         self.vlm_updater = VLM_Updater(
             num_categories=config.max_num_embodiments,
@@ -266,9 +266,6 @@ class FlowmatchingActionHead(nn.Module):
 
         # Add normalization for stable training
         self.vlm_layer_norm = nn.LayerNorm(2048)
-
-        # Fixed scale factor for residual magnitude control
-        self.alpha = 0.25  # Fixed moderate updates
 
         # Removed fusion_scale - MLP can learn appropriate output scale directly
         self.action_encoder = MultiEmbodimentActionEncoder(
@@ -402,37 +399,17 @@ class FlowmatchingActionHead(nn.Module):
         embodiment_id = action_input.embodiment_id
 
         state_features = self.state_encoder(action_input.state, embodiment_id)  # old encoder
-        obs_features = self.obs_encoder_alone(action_input.simple_img)  # (B, 1, 2048)
-        print(f"[DEBUG] obs_features: range=[{obs_features.min().item():.6f}, {obs_features.max().item():.6f}]")
+        obs_features = self.obs_encoder_alone(action_input.simple_img)  # (B, 1, 1536)
+        print(f"[DEBUG] obs_features: shape={obs_features.shape}, range=[{obs_features.min().item():.6f}, {obs_features.max().item():.6f}]")
 
-        ################### improved mlp fusion with proper normalization ###################
-        # Normalize obs features to match VLM scale for consistent fusion
-        vl_embs_normalized = vl_embs  # Keep VLM as-is (already processed by vlln)
-
-        # Normalize obs features to match VLM scale
+        ################### add obs features to sa_embs (preserve VLM) ###################
+        # Normalize obs features for stable training
         obs_features_mean = obs_features.mean(dim=-1, keepdim=True)
         obs_features_std = obs_features.std(dim=-1, keepdim=True) + 1e-6
         obs_features_normalized = (obs_features - obs_features_mean) / obs_features_std
-
-        # Scale obs features to match VLM magnitude
-        vl_embs_std = vl_embs.std(dim=-1, keepdim=True) + 1e-6
-        obs_features_normalized = obs_features_normalized * vl_embs_std
-
-        print(
-            f"[DEBUG] obs_features_normalized: range=[{obs_features_normalized.min().item():.6f}, {obs_features_normalized.max().item():.6f}]"
-        )
-
-        obs_features_expanded = obs_features_normalized.expand(-1, vl_embs.shape[1], -1)  # (B, T, 2048)
-
-        combined_features = torch.cat([vl_embs_normalized, obs_features_expanded], dim=-1)  # (B, T, 4096)
-
-        # Learn residual updates instead of replacing entire embedding
-        vlm_residual = self.vlm_obs_fusion(combined_features, embodiment_id)  # (B, T, 2048)
-
-        # Apply fixed alpha scaling
-        vl_embs = vl_embs + self.alpha * vlm_residual  # Residual connection: original + scaled update
-        print(f"[DEBUG] alpha: {self.alpha}")
-        print(f"[DEBUG] updated vl_embs: range=[{vl_embs.min().item():.6f}, {vl_embs.max().item():.6f}]")
+        
+        print(f"[DEBUG] obs_features_normalized: shape={obs_features_normalized.shape}, range=[{obs_features_normalized.min().item():.6f}, {obs_features_normalized.max().item():.6f}]")
+        print(f"[DEBUG] VLM embeddings preserved (no fusion), obs added to sa_embs")
 
         ################### vlm update ###################
         # state_features = self.state_obs_encoder(action_input.state, action_input.simple_img, embodiment_id)
@@ -461,25 +438,29 @@ class FlowmatchingActionHead(nn.Module):
         future_tokens = self.future_tokens.weight.unsqueeze(0).expand(vl_embs.shape[0], -1, -1)
 
         # Get the minimum batch size among all tensors to be concatenated
-        min_len = min(state_features.shape[0], future_tokens.shape[0], action_features.shape[0])
+        min_len = min(state_features.shape[0], future_tokens.shape[0], action_features.shape[0], obs_features_normalized.shape[0])
 
         # Slice all tensors to the minimum batch size
         state_features = state_features[:min_len]
         future_tokens = future_tokens[:min_len]
         action_features = action_features[:min_len]
+        obs_features_normalized = obs_features_normalized[:min_len]
 
         # Debug printout
-        if not (state_features.shape[0] == future_tokens.shape[0] == action_features.shape[0]):
+        if not (state_features.shape[0] == future_tokens.shape[0] == action_features.shape[0] == obs_features_normalized.shape[0]):
             print(
                 f"[DEBUG] Batch size mismatch after slicing! "
                 f"state_features: {state_features.shape}, "
                 f"future_tokens: {future_tokens.shape}, "
-                f"action_features: {action_features.shape}"
+                f"action_features: {action_features.shape}, "
+                f"obs_features_normalized: {obs_features_normalized.shape}"
             )
         else:
             pass
 
-        sa_embs = torch.cat((state_features, future_tokens, action_features), dim=1)
+        # Add obs features to sa_embs: state + future_tokens + obs + actions
+        sa_embs = torch.cat((state_features, future_tokens, obs_features_normalized, action_features), dim=1)
+        print(f"[DEBUG] sa_embs shape: {sa_embs.shape} (state + future_tokens + obs + actions)")
 
         vl_attn_mask = backbone_output.backbone_attention_mask
 
@@ -684,30 +665,13 @@ class FlowmatchingActionHead(nn.Module):
         embodiment_id = action_input.embodiment_id
 
         state_features = self.state_encoder(action_input.state, embodiment_id)  # old encoder
-        obs_features = self.obs_encoder_alone(action_input.simple_img)  # (B, 1, 2048)
+        obs_features = self.obs_encoder_alone(action_input.simple_img)  # (B, 1, 1536)
 
-        ################### improved mlp fusion with proper normalization ###################
-        # Normalize obs features to match VLM scale for consistent fusion
-        vl_embs_normalized = vl_embs  # Keep VLM as-is (already processed by vlln)
-
-        # Normalize obs features to match VLM scale
+        ################### add obs features to sa_embs (preserve VLM) ###################
+        # Normalize obs features for stable training
         obs_features_mean = obs_features.mean(dim=-1, keepdim=True)
         obs_features_std = obs_features.std(dim=-1, keepdim=True) + 1e-6
         obs_features_normalized = (obs_features - obs_features_mean) / obs_features_std
-
-        # Scale obs features to match VLM magnitude
-        vl_embs_std = vl_embs.std(dim=-1, keepdim=True) + 1e-6
-        obs_features_normalized = obs_features_normalized * vl_embs_std
-
-        obs_features_expanded = obs_features_normalized.expand(-1, vl_embs.shape[1], -1)  # (B, T, 2048)
-
-        combined_features = torch.cat([vl_embs_normalized, obs_features_expanded], dim=-1)  # (B, T, 4096)
-
-        # Learn residual updates instead of replacing entire embedding
-        vlm_residual = self.vlm_obs_fusion(combined_features, embodiment_id)  # (B, T, 2048)
-
-        # Apply fixed alpha scaling
-        vl_embs = vl_embs + self.alpha * vlm_residual  # Residual connection: original + scaled update
 
         # Set initial actions as the sampled noise.
         batch_size = vl_embs.shape[0]
@@ -737,7 +701,8 @@ class FlowmatchingActionHead(nn.Module):
 
             # Join vision, language, state and action embedding along sequence dimension.
             future_tokens = self.future_tokens.weight.unsqueeze(0).expand(vl_embs.shape[0], -1, -1)
-            sa_embs = torch.cat((state_features, future_tokens, action_features), dim=1)
+            # Add obs features to sa_embs: state + future_tokens + obs + actions
+            sa_embs = torch.cat((state_features, future_tokens, obs_features_normalized, action_features), dim=1)
 
             # Run model forward.
             model_output = self.model(
