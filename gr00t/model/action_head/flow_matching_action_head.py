@@ -400,16 +400,17 @@ class FlowmatchingActionHead(nn.Module):
 
         state_features = self.state_encoder(action_input.state, embodiment_id)  # old encoder
         obs_features = self.obs_encoder_alone(action_input.simple_img)  # (B, 1, 1536)
-        print(f"[DEBUG] obs_features: shape={obs_features.shape}, range=[{obs_features.min().item():.6f}, {obs_features.max().item():.6f}]")
+        print(f"[DEBUG] obs_features: range=[{obs_features.min().item():.6f}, {obs_features.max().item():.6f}]")
 
         ################### add obs features to sa_embs (preserve VLM) ###################
         # Normalize obs features for stable training
         obs_features_mean = obs_features.mean(dim=-1, keepdim=True)
         obs_features_std = obs_features.std(dim=-1, keepdim=True) + 1e-6
         obs_features_normalized = (obs_features - obs_features_mean) / obs_features_std
-        
-        print(f"[DEBUG] obs_features_normalized: shape={obs_features_normalized.shape}, range=[{obs_features_normalized.min().item():.6f}, {obs_features_normalized.max().item():.6f}]")
-        print(f"[DEBUG] VLM embeddings preserved (no fusion), obs added to sa_embs")
+
+        print(
+            f"[DEBUG] obs_features_normalized: range=[{obs_features_normalized.min().item():.6f}, {obs_features_normalized.max().item():.6f}]"
+        )
 
         ################### vlm update ###################
         # state_features = self.state_obs_encoder(action_input.state, action_input.simple_img, embodiment_id)
@@ -438,7 +439,12 @@ class FlowmatchingActionHead(nn.Module):
         future_tokens = self.future_tokens.weight.unsqueeze(0).expand(vl_embs.shape[0], -1, -1)
 
         # Get the minimum batch size among all tensors to be concatenated
-        min_len = min(state_features.shape[0], future_tokens.shape[0], action_features.shape[0], obs_features_normalized.shape[0])
+        min_len = min(
+            state_features.shape[0],
+            future_tokens.shape[0],
+            action_features.shape[0],
+            obs_features_normalized.shape[0],
+        )
 
         # Slice all tensors to the minimum batch size
         state_features = state_features[:min_len]
@@ -447,7 +453,12 @@ class FlowmatchingActionHead(nn.Module):
         obs_features_normalized = obs_features_normalized[:min_len]
 
         # Debug printout
-        if not (state_features.shape[0] == future_tokens.shape[0] == action_features.shape[0] == obs_features_normalized.shape[0]):
+        if not (
+            state_features.shape[0]
+            == future_tokens.shape[0]
+            == action_features.shape[0]
+            == obs_features_normalized.shape[0]
+        ):
             print(
                 f"[DEBUG] Batch size mismatch after slicing! "
                 f"state_features: {state_features.shape}, "
@@ -460,7 +471,6 @@ class FlowmatchingActionHead(nn.Module):
 
         # Add obs features to sa_embs: state + future_tokens + obs + actions
         sa_embs = torch.cat((state_features, future_tokens, obs_features_normalized, action_features), dim=1)
-        print(f"[DEBUG] sa_embs shape: {sa_embs.shape} (state + future_tokens + obs + actions)")
 
         vl_attn_mask = backbone_output.backbone_attention_mask
 

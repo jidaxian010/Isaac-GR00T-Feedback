@@ -929,9 +929,11 @@ class PandaHandDataConfig(BaseDataConfig):  # libero panda hand
         return modality_configs
 
     def transform(self):
-        # Mirror video keys to create obs keys for observation encoder
-        obs_keys = [k.replace("video.", "obs.") for k in self.video_keys]
-        all_video_like_keys = self.video_keys + obs_keys
+        # Create obs keys by transforming video.eye_in_hand_rgb -> obs.eye_in_hand_rgb
+        # Keep video.agentview_rgb for VLM, create obs.eye_in_hand_rgb for observation encoder
+        obs_keys = ["obs.eye_in_hand_rgb"]  # Only eye_in_hand for obs
+        video_keys_for_vlm = ["video.agentview_rgb"]  # Only agentview for VLM
+        all_video_like_keys = video_keys_for_vlm + obs_keys
 
         transforms = [
             # video transforms (apply to both video.* and obs.*)
@@ -960,7 +962,7 @@ class PandaHandDataConfig(BaseDataConfig):  # libero panda hand
             ),
             # concat transforms
             ConcatTransform(
-                video_concat_order=self.video_keys,
+                video_concat_order=video_keys_for_vlm,
                 obs_concat_order=obs_keys,
                 state_concat_order=self.state_keys,
                 action_concat_order=self.action_keys,

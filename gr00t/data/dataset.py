@@ -459,6 +459,8 @@ class LeRobotSingleDataset(Dataset):
             for key in modality_config.modality_keys:
                 if key == "lapa_action" or key == "dream_actions":
                     continue  # no need for any metadata for lapa actions because it comes normalized
+                if key.startswith("obs."):
+                    continue  # obs.* keys are created by dataset, not in LeRobot metadata
                 # Check if the key is valid
                 try:
                     self.lerobot_modality_meta.get_key_meta(key)
@@ -503,41 +505,47 @@ class LeRobotSingleDataset(Dataset):
         return data
 
     def get_step_data(self, trajectory_id: int, base_index: int) -> dict:
-        """Get the RAW data for a single step in a trajectory. No transforms are applied."""
+        """Get the RAW data for a single step. No transforms are applied.
+
+        Args:
+            trajectory_id (str): The ID of the trajectory.
+            base_index (int): The base index of the step.
+
+        Returns:
+            dict: The data for the step.
+        """
         data = {}
-        # Get the data for all modalities
         self.curr_traj_data = self.get_trajectory_data(trajectory_id)
 
-        for modality in self.modality_keys:  # ["video", "state", "action", "language"]
+        # Debug: Track if our specific video keys are processed
+        agentview_processed = False
+        eye_in_hand_processed = False
+
+        # Get the data for all modalities
+        for modality in self.modality_keys:
+            # Get the data corresponding to each key in the modality
             for key in self.modality_keys[modality]:
-                if modality == "video":
-                    # Handle video keys based on camera type
-                    if key == "video.agentview_rgb":
-                        # VLM data - use anchored lookback for agentview_rgb
-                        data[key] = self.get_data_by_modality(
-                            trajectory_id, modality, key, base_index, is_anchored=True
-                        )
-                    elif key == "video.eye_in_hand_rgb":
-                        # Observation data - use current timestep for eye_in_hand_rgb
-                        data[key] = self.get_data_by_modality(
-                            trajectory_id, modality, key, base_index, is_anchored=False
-                        )
-                    else:
-                        # Default to current timestep
-                        data[key] = self.get_data_by_modality(
-                            trajectory_id, modality, key, base_index, is_anchored=False
-                        )
+                if key == "video.agentview_rgb":
+                    # Only load agentview for video modality (VLM)
+                    data[key] = self.get_data_by_modality(trajectory_id, modality, key, base_index)
+                    agentview_processed = True
+                elif key == "video.eye_in_hand_rgb":
+                    # Only load eye_in_hand for obs modality (observation encoder)
+                    obs_key = key.replace("video.", "obs.")
+                    data[obs_key] = self.get_data_by_modality(trajectory_id, modality, key, base_index)
+                    eye_in_hand_processed = True
                 else:
-                    # Non-video data - use current timestep
-                    data[key] = self.get_data_by_modality(
-                        trajectory_id, modality, key, base_index, is_anchored=False
-                    )
+                    data[key] = self.get_data_by_modality(trajectory_id, modality, key, base_index)
 
-        # Create obs keys by copying from video keys (for observation encoder)
-        obs_keys = [k.replace("video.", "obs.") for k in self.modality_keys["video"]]
-        for obs_key, video_key in zip(obs_keys, self.modality_keys["video"]):
-            data[obs_key] = data[video_key]  # Copy the video data to obs key
-
+        # Debug: Check if our expected keys were processed
+        if not agentview_processed:
+            raise RuntimeError(
+                f"video.agentview_rgb was not found in modality_keys. Available keys: {[k for mod_keys in self.modality_keys.values() for k in mod_keys]}"
+            )
+        if not eye_in_hand_processed:
+            raise RuntimeError(
+                f"video.eye_in_hand_rgb was not found in modality_keys. Available keys: {[k for mod_keys in self.modality_keys.values() for k in mod_keys]}"
+            )
         return data
 
     def _get_last_vlm_lookback_n(self) -> int:
