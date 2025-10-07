@@ -23,14 +23,12 @@ from typing import List, Literal
 import torch
 import numpy as np
 import numpy.core.multiarray
+
 # Allowlist numpy reconstruct, ndarray, dtype, and UInt32DType for torch.load RNG state
 try:
-    torch.serialization.add_safe_globals([
-        numpy.core.multiarray._reconstruct,
-        np.ndarray,
-        np.dtype,
-        np.dtypes.UInt32DType
-    ])
+    torch.serialization.add_safe_globals(
+        [numpy.core.multiarray._reconstruct, np.ndarray, np.dtype, np.dtypes.UInt32DType]
+    )
 except Exception as e:
     print(f"Warning: Could not add numpy globals to torch safe globals: {e}")
 import tyro
@@ -40,8 +38,7 @@ from gr00t.data.dataset import LeRobotMixtureDataset, LeRobotSingleDataset
 from gr00t.data.schema import EmbodimentTag
 from gr00t.experiment.data_config import DATA_CONFIG_MAP
 from gr00t.experiment.runner import TrainRunner
-# from gr00t.model.gr00t_n1 import GR00T_N1_5
-from gr00t.model.splitpolicy import GR00T_N1_5
+from gr00t.model.gr00t_n1 import GR00T_N1_5
 from gr00t.model.transforms import EMBODIMENT_TAG_MAPPING
 from gr00t.utils.peft import get_lora_model
 
@@ -315,9 +312,9 @@ if __name__ == "__main__":
     available_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
 
     # Validate GPU configuration
-    assert (
-        config.num_gpus <= available_gpus
-    ), f"Number of GPUs requested ({config.num_gpus}) is greater than the available GPUs ({available_gpus})"
+    assert config.num_gpus <= available_gpus, (
+        f"Number of GPUs requested ({config.num_gpus}) is greater than the available GPUs ({available_gpus})"
+    )
     assert config.num_gpus > 0, "Number of GPUs must be greater than 0"
     print(f"Using {config.num_gpus} GPUs")
 

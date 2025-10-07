@@ -169,6 +169,7 @@ class FlowmatchingActionHead(nn.Module):
             hidden_dim=self.hidden_size,
             output_dim=self.input_embedding_dim,
         )
+
         self.action_encoder = MultiEmbodimentActionEncoder(
             action_dim=config.action_dim,
             hidden_size=self.input_embedding_dim,

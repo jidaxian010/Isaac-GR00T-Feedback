@@ -496,38 +496,41 @@ class LeRobotSingleDataset(Dataset):
         return self.transforms(self.get_step_data(trajectory_id, base_index))
 
     def get_step_data(self, trajectory_id: int, base_index: int) -> dict:
-        """Get the RAW data for a single step in a trajectory. No transforms are applied.
+        """Get the RAW data for a single step. No transforms are applied.
 
         Args:
-            trajectory_id (int): The name of the trajectory.
-            base_index (int): The base step index in the trajectory.
+            trajectory_id (str): The ID of the trajectory.
+            base_index (int): The base index of the step.
 
         Returns:
-            dict: The RAW data for the step.
-
-        Example return:
-            {
-                "video": {
-                    "video.image_side_0": [B, T, H, W, C],
-                    "video.image_side_1": [B, T, H, W, C],
-                },
-                "state": {
-                    "state.eef_position": [B, T, state_dim],
-                    "state.eef_rotation": [B, T, state_dim],
-                },
-                "action": {
-                    "action.eef_position": [B, T, action_dim],
-                    "action.eef_rotation": [B, T, action_dim],
-                },
-            }
+            dict: The data for the step.
         """
         data = {}
-        # Get the data for all modalities
         self.curr_traj_data = self.get_trajectory_data(trajectory_id)
+
+        # Get the data for all modalities
         for modality in self.modality_keys:
             # Get the data corresponding to each key in the modality
             for key in self.modality_keys[modality]:
-                data[key] = self.get_data_by_modality(trajectory_id, modality, key, base_index)
+                if key == "video.agentview_rgb":
+                    # Only load agentview for video modality (VLM)
+                    data[key] = self.get_data_by_modality(trajectory_id, modality, key, base_index)
+                elif key == "video.eye_in_hand_rgb":
+                    # Only load eye_in_hand for obs modality (observation encoder)
+                    obs_key = key.replace("video.", "obs.")
+                    data[obs_key] = self.get_data_by_modality(trajectory_id, modality, key, base_index)
+                else:
+                    data[key] = self.get_data_by_modality(trajectory_id, modality, key, base_index)
+
+        if "obs.agentview_rgb" in data:
+            raise ValueError(f"obs.agentview_rgb should not be in data for {data=}")
+        if "video.eye_in_hand_rgb" in data:
+            raise ValueError(f"video.eye_in_hand_rgb should not be in data for {data=}")
+        if "obs.eye_in_hand_rgb" not in data:
+            raise ValueError(f"obs.eye_in_hand_rgb should be in data for {data=}")
+        if "video.agentview_rgb" not in data:
+            raise ValueError(f"video.agentview_rgb should be in data for {data=}")
+
         return data
 
     def get_trajectory_data(self, trajectory_id: int) -> pd.DataFrame:

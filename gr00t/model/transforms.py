@@ -307,15 +307,12 @@ class GR00TTransform(InvertibleModalityTransform):
         transformed_data["state"] = state
         transformed_data["state_mask"] = state_mask
 
-        # # 2.5) Prepare simple image (use only non-anchored obs)
-        # if "obs" in data:
-        #     simple_img = data["obs"]
-        #     transformed_data["simple_img"] = simple_img
-        # else:
-        #     # Create a placeholder obs tensor if obs is not provided
-        #     # This matches the expected shape from video processing
-        #     simple_img = np.zeros((1, 1, 224, 224, 3), dtype=np.uint8)  # [V, T, H, W, C]
-        #     transformed_data["simple_img"] = simple_img
+        # 2.5) Prepare simple image (use only non-anchored obs)
+        if "obs" in data:
+            simple_img = data["obs"]
+            transformed_data["simple_img"] = simple_img
+        else:
+            raise ValueError(f"No obs data found for {data=}")
 
         if self.training:
             # 3) Prepare actions

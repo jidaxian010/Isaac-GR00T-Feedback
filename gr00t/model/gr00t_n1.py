@@ -85,7 +85,7 @@ class GR00T_N1_5(PreTrainedModel):
         # action_head_cfg.action_horizon = 4
         # print(f"overriding max_num_embodiments: {action_head_cfg.max_num_embodiments}")
         # print(f"overriding action_horizon: {action_head_cfg.action_horizon}")
-        
+
         self.action_head = FlowmatchingActionHead(action_head_cfg)
 
         self.action_horizon = config.action_horizon
@@ -95,7 +95,7 @@ class GR00T_N1_5(PreTrainedModel):
     def validate_inputs(self, inputs):
         # NOTE -- this should be handled internally by the model
         # however, doing that will likely be breaking changes -- so we'll need to do it after the deadline
-        
+
         # print(f"action_horizon: {self.action_horizon}")
         # print(f"action_dim: {self.action_dim}")
 
@@ -136,8 +136,7 @@ class GR00T_N1_5(PreTrainedModel):
 
     def validate_data(self, action_head_outputs, backbone_outputs, is_training):
         fail_backbone = (
-            not isinstance(backbone_outputs, BatchFeature)
-            or BACKBONE_FEATURE_KEY not in backbone_outputs
+            not isinstance(backbone_outputs, BatchFeature) or BACKBONE_FEATURE_KEY not in backbone_outputs
         )
 
         if fail_backbone:
@@ -166,41 +165,16 @@ class GR00T_N1_5(PreTrainedModel):
             error_msg += f"\n{self.action_horizon=}"
             error_msg += f"\n{self.action_dim=}"
             raise ValueError(error_msg)
-    
+
     # TODO: when reuse vlm values, it's passed into backward progress again. Try to Detach
 
-    # def forward(
-    #     self,
-    #     inputs: dict,
-    #     window_idx: int = None,
-    # ) -> BatchFeature:
-    #     backbone_inputs, action_inputs = self.prepare_input(inputs)
-    #     backbone_outputs = self.backbone(backbone_inputs)
-    #     action_head_outputs = self.action_head(backbone_outputs, action_inputs)
-    #     self.validate_data(action_head_outputs, backbone_outputs, is_training=True)
-    #     return action_head_outputs
-
-
-    def forward(self, inputs: dict, window_idx: int = None) -> BatchFeature:
+    def forward(
+        self,
+        inputs: dict,
+        window_idx: int = None,
+    ) -> BatchFeature:
         backbone_inputs, action_inputs = self.prepare_input(inputs)
-        if window_idx is None or window_idx % 4 == 0:
-            # print(f"Training: window_idx={window_idx} (VLM RUNNING)")
-            fresh = self.backbone(backbone_inputs)
-            self._cached_backbone_outputs = self._detach_batchfeature(fresh)
-            backbone_outputs = self._cached_backbone_outputs
-            backbone_outputs["backbone_features"] = backbone_outputs["backbone_features"].clone().detach()
-        else:
-            # print(f"Training: window_idx={window_idx} (USING CACHED VLM)")
-            backbone_outputs = self._cached_backbone_outputs
-            backbone_outputs["backbone_features"] = backbone_outputs["backbone_features"].clone().detach()
-            
-            # # Debug: check detachment
-            # for name, tensor in self._cached_backbone_outputs.items():
-            #     if torch.is_tensor(tensor):
-            #         print(
-            #             f"[DETACH DEBUG backbone] {name}: requires_grad={tensor.requires_grad}, grad_fn={tensor.grad_fn}"
-            #         )
-
+        backbone_outputs = self.backbone(backbone_inputs)
         action_head_outputs = self.action_head(backbone_outputs, action_inputs)
         self.validate_data(action_head_outputs, backbone_outputs, is_training=True)
         return action_head_outputs
@@ -227,8 +201,6 @@ class GR00T_N1_5(PreTrainedModel):
         new_bf.data = detached_data
         return new_bf
 
-
-
     def get_action(
         self,
         inputs: dict,
@@ -240,7 +212,7 @@ class GR00T_N1_5(PreTrainedModel):
         action_head_outputs = self.action_head.get_action(backbone_outputs, action_inputs)
         self.validate_data(action_head_outputs, backbone_outputs, is_training=False)
         return action_head_outputs
-    
+
     # def get_action(
     #     self,
     #     inputs: dict,
@@ -261,18 +233,15 @@ class GR00T_N1_5(PreTrainedModel):
     #         self.validate_data(action_head_outputs, backbone_outputs, is_training=False)
     #         return action_head_outputs
     #     else:
-    #         print(f"hey, im at {time_step}, CACHED VLM") 
+    #         print(f"hey, im at {time_step}, CACHED VLM")
     #         # Reuse cached backbone outputs, only run action_head
     #         if not hasattr(self, '_cached_backbone_outputs'):
     #             raise ValueError(f"No cached backbone outputs available at timestep {time_step}")
-            
+
     #         action_head_outputs = self.action_head.get_action(self._cached_backbone_outputs, action_inputs)
 
     #         self.validate_data(action_head_outputs, self._cached_backbone_outputs, is_training=False)
     #         return action_head_outputs
-
-
-
 
     def prepare_input(self, inputs) -> Tuple[BatchFeature, BatchFeature]:
         self.validate_inputs(inputs)
@@ -316,13 +285,9 @@ class GR00T_N1_5(PreTrainedModel):
             )
             local_model_path = pretrained_model_name_or_path
 
-        pretrained_model = super().from_pretrained(
-            local_model_path, local_model_path=local_model_path, **kwargs
-        )
+        pretrained_model = super().from_pretrained(local_model_path, local_model_path=local_model_path, **kwargs)
 
-        pretrained_model.backbone.set_trainable_parameters(
-            tune_visual=tune_visual, tune_llm=tune_llm
-        )
+        pretrained_model.backbone.set_trainable_parameters(tune_visual=tune_visual, tune_llm=tune_llm)
         pretrained_model.action_head.set_trainable_parameters(
             tune_projector=tune_projector, tune_diffusion_model=tune_diffusion_model
         )
