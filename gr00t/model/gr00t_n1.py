@@ -232,6 +232,7 @@ class GR00T_N1_5(PreTrainedModel):
     def get_action(
         self,
         inputs: dict,
+        time_step: int,
     ) -> BatchFeature:
         backbone_inputs, action_inputs = self.prepare_input(inputs)
         # Because the behavior of backbones remains the same for training and inference, we can use `forward` for backbones.
@@ -239,6 +240,39 @@ class GR00T_N1_5(PreTrainedModel):
         action_head_outputs = self.action_head.get_action(backbone_outputs, action_inputs)
         self.validate_data(action_head_outputs, backbone_outputs, is_training=False)
         return action_head_outputs
+    
+    # def get_action(
+    #     self,
+    #     inputs: dict,
+    #     time_step: int,
+    # ) -> BatchFeature:
+    #     backbone_inputs, action_inputs = self.prepare_input(inputs)
+    #     print("Run Fast Model")
+    #     if time_step % 2 == 0:
+    #         # Run both backbone and action_head
+    #         print(f"im at {time_step}, FRESH VLM")
+    #         print("320 320 320")
+    #         backbone_outputs = self.backbone(backbone_inputs)
+
+    #         self._cached_backbone_outputs = backbone_outputs
+
+    #         action_head_outputs = self.action_head.get_action(backbone_outputs, action_inputs)
+
+    #         self.validate_data(action_head_outputs, backbone_outputs, is_training=False)
+    #         return action_head_outputs
+    #     else:
+    #         print(f"hey, im at {time_step}, CACHED VLM") 
+    #         # Reuse cached backbone outputs, only run action_head
+    #         if not hasattr(self, '_cached_backbone_outputs'):
+    #             raise ValueError(f"No cached backbone outputs available at timestep {time_step}")
+            
+    #         action_head_outputs = self.action_head.get_action(self._cached_backbone_outputs, action_inputs)
+
+    #         self.validate_data(action_head_outputs, self._cached_backbone_outputs, is_training=False)
+    #         return action_head_outputs
+
+
+
 
     def prepare_input(self, inputs) -> Tuple[BatchFeature, BatchFeature]:
         self.validate_inputs(inputs)

@@ -27,9 +27,7 @@ from gr00t.data.dataset import ModalityConfig
 from gr00t.data.embodiment_tags import EmbodimentTag
 from gr00t.data.schema import DatasetMetadata
 from gr00t.data.transform.base import ComposedModalityTransform
-# from gr00t.model.gr00t_n1 import GR00T_N1_5
-from gr00t.model.splitpolicy import GR00T_N1_5
-
+from gr00t.model.gr00t_n1 import GR00T_N1_5
 
 COMPUTE_DTYPE = torch.bfloat16
 
@@ -145,7 +143,7 @@ class Gr00tPolicy(BasePolicy):
         """
         return self._modality_transform.unapply(action)
 
-    def get_action(self, observations: Dict[str, Any]) -> Dict[str, Any]:
+    def get_action(self, observations: Dict[str, Any], time_step: int) -> Dict[str, Any]:
         """
         Make a prediction with the model.
         Args:
@@ -154,12 +152,14 @@ class Gr00tPolicy(BasePolicy):
         e.g. obs = {
             "video.<>": np.ndarray,  # (T, H, W, C)
             "state.<>": np.ndarray, # (T, D)
+            "annotation.<>": np.ndarray, # (T, )
         }
 
         or with batched input:
         e.g. obs = {
             "video.<>": np.ndarray,, # (B, T, H, W, C)
             "state.<>": np.ndarray, # (B, T, D)
+            "annotation.<>": np.ndarray, # (B, T, )
         }
 
         Returns:
@@ -169,20 +169,26 @@ class Gr00tPolicy(BasePolicy):
         is_batch = self._check_state_is_batched(observations)
         if not is_batch:
             observations = unsqueeze_dict_values(observations)
+
+        # NOTE(YL): ensure keys are all in numpy array
+        for k, v in observations.items():
+            if not isinstance(v, np.ndarray):
+                observations[k] = np.array(v)
+
         # Apply transforms
         normalized_input = self.apply_transforms(observations)
 
-        normalized_action = self._get_action_from_normalized_input(normalized_input)
+        normalized_action = self._get_action_from_normalized_input(normalized_input, time_step)
         unnormalized_action = self._get_unnormalized_action(normalized_action)
 
         if not is_batch:
             unnormalized_action = squeeze_dict_values(unnormalized_action)
         return unnormalized_action
 
-    def _get_action_from_normalized_input(self, normalized_input: Dict[str, Any]) -> torch.Tensor:
+    def _get_action_from_normalized_input(self, normalized_input: Dict[str, Any], time_step: int) -> torch.Tensor:
         # Set up autocast context if needed
         with torch.inference_mode(), torch.autocast(device_type="cuda", dtype=COMPUTE_DTYPE):
-            model_pred = self.model.get_action(normalized_input)
+            model_pred = self.model.get_action(normalized_input, time_step)
 
         normalized_action = model_pred["action_pred"].float()
         return normalized_action
@@ -233,7 +239,6 @@ class Gr00tPolicy(BasePolicy):
     def _load_model(self, model_path):
         model = GR00T_N1_5.from_pretrained(model_path, torch_dtype=COMPUTE_DTYPE)
         model.eval()  # Set model to eval mode
-        model.to(device=self.device)  # type: ignore
 
         # Update action_horizon to match modality config
         # Get the expected action horizon from the modality config
@@ -266,6 +271,8 @@ class Gr00tPolicy(BasePolicy):
             model.config.action_horizon = expected_action_horizon
             model.action_horizon = expected_action_horizon
             model.config.action_head_cfg["action_horizon"] = expected_action_horizon
+
+        model.to(device=self.device)  # type: ignore
 
         self.model = model
 
