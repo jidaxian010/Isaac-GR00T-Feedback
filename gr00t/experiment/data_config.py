@@ -887,8 +887,103 @@ class AgibotGenie1DataConfig:
 ###########################################################################################
 
 
+# class PandaHandDataConfig(BaseDataConfig):  # libero panda hand
+#     video_keys = ["video.agentview_rgb", "video.eye_in_hand_rgb"]  # Both cameras in video modality
+#     state_keys = [
+#         "state.ee_pos",
+#         "state.ee_ori",
+#         "state.ee_states",
+#         "state.gripper_states",
+#         "state.joint_states",
+#     ]
+#     action_keys = ["action.all_actions"]
+
+#     language_keys = ["annotation.human.action.task_description"]
+#     observation_indices = [0]
+#     action_indices = list(range(16))
+
+#     def modality_config(self):
+#         video_modality = ModalityConfig(
+#             delta_indices=self.observation_indices,
+#             modality_keys=self.video_keys,
+#         )
+
+#         state_modality = ModalityConfig(
+#             delta_indices=self.observation_indices,
+#             modality_keys=self.state_keys,
+#         )
+#         action_modality = ModalityConfig(
+#             delta_indices=self.action_indices,
+#             modality_keys=self.action_keys,
+#         )
+#         language_modality = ModalityConfig(
+#             delta_indices=self.observation_indices,
+#             modality_keys=self.language_keys,
+#         )
+#         modality_configs = {
+#             "video": video_modality,
+#             "state": state_modality,
+#             "action": action_modality,
+#             "language": language_modality,
+#         }
+#         return modality_configs
+
+#     def transform(self):
+#         # Create obs keys by transforming video.eye_in_hand_rgb -> obs.eye_in_hand_rgb
+#         # Keep video.agentview_rgb for VLM, create obs.eye_in_hand_rgb for observation encoder
+#         obs_keys = ["obs.eye_in_hand_rgb"]  # Only eye_in_hand for obs
+#         video_keys_for_vlm = ["video.agentview_rgb"]  # Only agentview for VLM
+#         all_video_like_keys = video_keys_for_vlm + obs_keys
+
+#         transforms = [
+#             # video transforms (apply to both video.* and obs.*)
+#             VideoToTensor(apply_to=all_video_like_keys),
+#             VideoCrop(apply_to=all_video_like_keys, scale=0.95),
+#             VideoResize(apply_to=all_video_like_keys, height=224, width=224, interpolation="linear"),
+#             VideoColorJitter(
+#                 apply_to=all_video_like_keys,
+#                 brightness=0.3,
+#                 contrast=0.4,
+#                 saturation=0.5,
+#                 hue=0.08,
+#             ),
+#             VideoToNumpy(apply_to=all_video_like_keys),
+#             # state transforms
+#             StateActionToTensor(apply_to=self.state_keys),
+#             StateActionTransform(
+#                 apply_to=self.state_keys,
+#                 normalization_modes={key: "min_max" for key in self.state_keys},
+#             ),
+#             # action transforms
+#             StateActionToTensor(apply_to=self.action_keys),
+#             StateActionTransform(
+#                 apply_to=self.action_keys,
+#                 normalization_modes={key: "min_max" for key in self.action_keys},
+#             ),
+#             # concat transforms
+#             ConcatTransform(
+#                 video_concat_order=video_keys_for_vlm,
+#                 obs_concat_order=obs_keys,
+#                 state_concat_order=self.state_keys,
+#                 action_concat_order=self.action_keys,
+#             ),
+#             # model-specific transform
+#             GR00TTransform(
+#                 state_horizon=len(self.observation_indices),
+#                 action_horizon=len(self.action_indices),
+#                 max_state_dim=64,
+#                 max_action_dim=32,
+#             ),
+#         ]
+#         return ComposedModalityTransform(transforms=transforms)
+
+
+###########################################################################################
+
+
 class PandaHandDataConfig(BaseDataConfig):  # libero panda hand
-    video_keys = ["video.agentview_rgb", "video.eye_in_hand_rgb"]  # Both cameras in video modality
+    # video_keys = ["video.agentview_rgb", "video.eye_in_hand_rgb"]
+    video_keys = ["video.agentview_rgb"]
     state_keys = [
         "state.ee_pos",
         "state.ee_ori",
@@ -907,7 +1002,6 @@ class PandaHandDataConfig(BaseDataConfig):  # libero panda hand
             delta_indices=self.observation_indices,
             modality_keys=self.video_keys,
         )
-
         state_modality = ModalityConfig(
             delta_indices=self.observation_indices,
             modality_keys=self.state_keys,
@@ -929,25 +1023,21 @@ class PandaHandDataConfig(BaseDataConfig):  # libero panda hand
         return modality_configs
 
     def transform(self):
-        # Create obs keys by transforming video.eye_in_hand_rgb -> obs.eye_in_hand_rgb
-        # Keep video.agentview_rgb for VLM, create obs.eye_in_hand_rgb for observation encoder
-        obs_keys = ["obs.eye_in_hand_rgb"]  # Only eye_in_hand for obs
-        video_keys_for_vlm = ["video.agentview_rgb"]  # Only agentview for VLM
-        all_video_like_keys = video_keys_for_vlm + obs_keys
-
+        # Only apply transforms to video keys since the data only contains video.* keys
+        # (not obs.* keys as originally intended)
         transforms = [
-            # video transforms (apply to both video.* and obs.*)
-            VideoToTensor(apply_to=all_video_like_keys),
-            VideoCrop(apply_to=all_video_like_keys, scale=0.95),
-            VideoResize(apply_to=all_video_like_keys, height=224, width=224, interpolation="linear"),
+            # video transforms
+            VideoToTensor(apply_to=self.video_keys),
+            VideoCrop(apply_to=self.video_keys, scale=0.95),
+            VideoResize(apply_to=self.video_keys, height=224, width=224, interpolation="linear"),
             VideoColorJitter(
-                apply_to=all_video_like_keys,
+                apply_to=self.video_keys,
                 brightness=0.3,
                 contrast=0.4,
                 saturation=0.5,
                 hue=0.08,
             ),
-            VideoToNumpy(apply_to=all_video_like_keys),
+            VideoToNumpy(apply_to=self.video_keys),
             # state transforms
             StateActionToTensor(apply_to=self.state_keys),
             StateActionTransform(
@@ -962,8 +1052,7 @@ class PandaHandDataConfig(BaseDataConfig):  # libero panda hand
             ),
             # concat transforms
             ConcatTransform(
-                video_concat_order=video_keys_for_vlm,
-                obs_concat_order=obs_keys,
+                video_concat_order=self.video_keys,
                 state_concat_order=self.state_keys,
                 action_concat_order=self.action_keys,
             ),

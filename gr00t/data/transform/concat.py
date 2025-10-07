@@ -39,12 +39,11 @@ class ConcatTransform(InvertibleModalityTransform):
         "Format: ['video.ego_view_pad_res224_freq20', ...]",
     )
 
-    # New: non-anchored observation streams to be concatenated like video
-    obs_concat_order: Optional[list[str]] = Field(
-        default=None,
-        description="Concatenation order for each obs modality. "
-        "Format: ['obs.ego_view_pad_res224_freq20', ...]",
-    )
+    # # New: non-anchored observation streams to be concatenated like video
+    # obs_concat_order: Optional[list[str]] = Field(
+    #     default=None,
+    #     description="Concatenation order for each obs modality. Format: ['obs.ego_view_pad_res224_freq20', ...]",
+    # )
 
     state_concat_order: Optional[list[str]] = Field(
         default=None,
@@ -72,7 +71,7 @@ class ConcatTransform(InvertibleModalityTransform):
             include = {
                 "apply_to",
                 "video_concat_order",
-                "obs_concat_order",
+                # "obs_concat_order",
                 "state_concat_order",
                 "action_concat_order",
             }
@@ -101,17 +100,15 @@ class ConcatTransform(InvertibleModalityTransform):
             # ineed contained in the data. If not, then the keys are misspecified
             video_keys = grouped_keys["video"]
             assert self.video_concat_order is not None, f"{self.video_concat_order=}, {video_keys=}"
-            assert all(
-                item in video_keys for item in self.video_concat_order
-            ), f"keys in video_concat_order are misspecified, \n{video_keys=}, \n{self.video_concat_order=}"
+            assert all(item in video_keys for item in self.video_concat_order), (
+                f"keys in video_concat_order are misspecified, \n{video_keys=}, \n{self.video_concat_order=}"
+            )
 
             # Process each video view
             unsqueezed_videos = []
             for video_key in self.video_concat_order:
                 video_data = data.pop(video_key)
-                unsqueezed_video = np.expand_dims(
-                    video_data, axis=-4
-                )  # [..., H, W, C] -> [..., 1, H, W, C]
+                unsqueezed_video = np.expand_dims(video_data, axis=-4)  # [..., H, W, C] -> [..., 1, H, W, C]
                 unsqueezed_videos.append(unsqueezed_video)
             # Concatenate along the new axis
             unsqueezed_video = np.concatenate(unsqueezed_videos, axis=-4)  # [..., V, H, W, C]
@@ -119,26 +116,26 @@ class ConcatTransform(InvertibleModalityTransform):
             # Video
             data["video"] = unsqueezed_video
 
-        # New: concatenate obs views similar to video
-        if "obs" in grouped_keys and self.obs_concat_order is not None:
-            obs_keys = grouped_keys["obs"]
-            assert all(
-                item in obs_keys for item in self.obs_concat_order
-            ), f"keys in obs_concat_order are misspecified, \n{obs_keys=}, \n{self.obs_concat_order=}"
-            unsqueezed_obs = []
-            for obs_key in self.obs_concat_order:
-                obs_data = data.pop(obs_key)
-                unsqueezed = np.expand_dims(obs_data, axis=-4)  # [..., 1, H, W, C]
-                unsqueezed_obs.append(unsqueezed)
-            data["obs"] = np.concatenate(unsqueezed_obs, axis=-4)  # [..., V, H, W, C]
+        # # New: concatenate obs views similar to video
+        # if "obs" in grouped_keys and self.obs_concat_order is not None:
+        #     obs_keys = grouped_keys["obs"]
+        #     assert all(
+        #         item in obs_keys for item in self.obs_concat_order
+        #     ), f"keys in obs_concat_order are misspecified, \n{obs_keys=}, \n{self.obs_concat_order=}"
+        #     unsqueezed_obs = []
+        #     for obs_key in self.obs_concat_order:
+        #         obs_data = data.pop(obs_key)
+        #         unsqueezed = np.expand_dims(obs_data, axis=-4)  # [..., 1, H, W, C]
+        #         unsqueezed_obs.append(unsqueezed)
+        #     data["obs"] = np.concatenate(unsqueezed_obs, axis=-4)  # [..., V, H, W, C]
 
         # "state"
         if "state" in grouped_keys:
             state_keys = grouped_keys["state"]
             assert self.state_concat_order is not None, f"{self.state_concat_order=}"
-            assert all(
-                item in state_keys for item in self.state_concat_order
-            ), f"keys in state_concat_order are misspecified, \n{state_keys=}, \n{self.state_concat_order=}"
+            assert all(item in state_keys for item in self.state_concat_order), (
+                f"keys in state_concat_order are misspecified, \n{state_keys=}, \n{self.state_concat_order=}"
+            )
             # Check the state dims
             for key in self.state_concat_order:
                 target_shapes = [self.state_dims[key]]
@@ -146,30 +143,28 @@ class ConcatTransform(InvertibleModalityTransform):
                     target_shapes.append(6)  # Allow for rotation_6d
                 # if key in ["state.right_arm", "state.right_hand"]:
                 target_shapes.append(self.state_dims[key] * 2)  # Allow for sin-cos transform
-                assert (
-                    data[key].shape[-1] in target_shapes
-                ), f"State dim mismatch for {key=}, {data[key].shape[-1]=}, {target_shapes=}"
+                assert data[key].shape[-1] in target_shapes, (
+                    f"State dim mismatch for {key=}, {data[key].shape[-1]=}, {target_shapes=}"
+                )
             # Concatenate the state keys
             # We'll have StateActionToTensor before this transform, so here we use torch.cat
-            data["state"] = torch.cat(
-                [data.pop(key) for key in self.state_concat_order], dim=-1
-            )  # [T, D_state]
+            data["state"] = torch.cat([data.pop(key) for key in self.state_concat_order], dim=-1)  # [T, D_state]
 
         if "action" in grouped_keys:
             action_keys = grouped_keys["action"]
             assert self.action_concat_order is not None, f"{self.action_concat_order=}"
             # Check if all keys in concat_order are present
-            assert set(self.action_concat_order) == set(
-                action_keys
-            ), f"{set(self.action_concat_order)=}, {set(action_keys)=}"
+            assert set(self.action_concat_order) == set(action_keys), (
+                f"{set(self.action_concat_order)=}, {set(action_keys)=}"
+            )
             # Record the action dims
             for key in self.action_concat_order:
                 target_shapes = [self.action_dims[key]]
                 if self.is_rotation_key(key):
                     target_shapes.append(3)  # Allow for axis angle
-                assert (
-                    self.action_dims[key] == data[key].shape[-1]
-                ), f"Action dim mismatch for {key=}, {self.action_dims[key]=}, {data[key].shape[-1]=}"
+                assert self.action_dims[key] == data[key].shape[-1], (
+                    f"Action dim mismatch for {key=}, {self.action_dims[key]=}, {data[key].shape[-1]=}"
+                )
             # Concatenate the action keys
             # We'll have StateActionToTensor before this transform, so here we use torch.cat
             data["action"] = torch.cat(
@@ -208,9 +203,9 @@ class ConcatTransform(InvertibleModalityTransform):
         assert self.dataset_metadata is not None, "Metadata not set"
         modality_config = getattr(self.dataset_metadata.modalities, modality)
         assert subkey in modality_config, f"{subkey=} not found in {modality_config=}"
-        assert isinstance(
-            modality_config[subkey], StateActionMetadata
-        ), f"Expected {StateActionMetadata} for {subkey=}, got {type(modality_config[subkey])=}"
+        assert isinstance(modality_config[subkey], StateActionMetadata), (
+            f"Expected {StateActionMetadata} for {subkey=}, got {type(modality_config[subkey])=}"
+        )
         return modality_config[subkey]
 
     def get_state_action_dims(self, key: str) -> int:

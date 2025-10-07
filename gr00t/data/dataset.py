@@ -113,7 +113,6 @@ class LeRobotSingleDataset(Dataset):
         video_backend: str = "decord",
         video_backend_kwargs: dict | None = None,
         transforms: ComposedModalityTransform | None = None,
-        is_anchored: bool = True,
     ):
         """
         Initialize the dataset.
@@ -160,16 +159,11 @@ class LeRobotSingleDataset(Dataset):
         self._video_path_pattern = self._get_video_path_pattern()
         self._chunk_size = self._get_chunk_size()
         self._tasks = self._get_tasks()
-        self.is_anchored = is_anchored
         self.curr_traj_data = None
         self.curr_traj_id = None
-        self._last_vlm_lookback_n = None  # Store the last used n value
 
         # Check if the dataset is valid
         self._check_integrity()
-
-        # VLM-specific config
-        self._vlm_group_size = 4
 
     @property
     def dataset_path(self) -> Path:
@@ -459,8 +453,6 @@ class LeRobotSingleDataset(Dataset):
             for key in modality_config.modality_keys:
                 if key == "lapa_action" or key == "dream_actions":
                     continue  # no need for any metadata for lapa actions because it comes normalized
-                if key.startswith("obs."):
-                    continue  # obs.* keys are created by dataset, not in LeRobot metadata
                 # Check if the key is valid
                 try:
                     self.lerobot_modality_meta.get_key_meta(key)
@@ -501,56 +493,42 @@ class LeRobotSingleDataset(Dataset):
             dict: The data for the step.
         """
         trajectory_id, base_index = self.all_steps[index]
-        data = self.transforms(self.get_step_data(trajectory_id, base_index))
-        return data
+        return self.transforms(self.get_step_data(trajectory_id, base_index))
 
     def get_step_data(self, trajectory_id: int, base_index: int) -> dict:
-        """Get the RAW data for a single step. No transforms are applied.
+        """Get the RAW data for a single step in a trajectory. No transforms are applied.
 
         Args:
-            trajectory_id (str): The ID of the trajectory.
-            base_index (int): The base index of the step.
+            trajectory_id (int): The name of the trajectory.
+            base_index (int): The base step index in the trajectory.
 
         Returns:
-            dict: The data for the step.
+            dict: The RAW data for the step.
+
+        Example return:
+            {
+                "video": {
+                    "video.image_side_0": [B, T, H, W, C],
+                    "video.image_side_1": [B, T, H, W, C],
+                },
+                "state": {
+                    "state.eef_position": [B, T, state_dim],
+                    "state.eef_rotation": [B, T, state_dim],
+                },
+                "action": {
+                    "action.eef_position": [B, T, action_dim],
+                    "action.eef_rotation": [B, T, action_dim],
+                },
+            }
         """
         data = {}
-        self.curr_traj_data = self.get_trajectory_data(trajectory_id)
-
-        # Debug: Track if our specific video keys are processed
-        agentview_processed = False
-        eye_in_hand_processed = False
-
         # Get the data for all modalities
+        self.curr_traj_data = self.get_trajectory_data(trajectory_id)
         for modality in self.modality_keys:
             # Get the data corresponding to each key in the modality
             for key in self.modality_keys[modality]:
-                if key == "video.agentview_rgb":
-                    # Only load agentview for video modality (VLM)
-                    data[key] = self.get_data_by_modality(trajectory_id, modality, key, base_index)
-                    agentview_processed = True
-                elif key == "video.eye_in_hand_rgb":
-                    # Only load eye_in_hand for obs modality (observation encoder)
-                    obs_key = key.replace("video.", "obs.")
-                    data[obs_key] = self.get_data_by_modality(trajectory_id, modality, key, base_index)
-                    eye_in_hand_processed = True
-                else:
-                    data[key] = self.get_data_by_modality(trajectory_id, modality, key, base_index)
-
-        # Debug: Check if our expected keys were processed
-        if not agentview_processed:
-            raise RuntimeError(
-                f"video.agentview_rgb was not found in modality_keys. Available keys: {[k for mod_keys in self.modality_keys.values() for k in mod_keys]}"
-            )
-        if not eye_in_hand_processed:
-            raise RuntimeError(
-                f"video.eye_in_hand_rgb was not found in modality_keys. Available keys: {[k for mod_keys in self.modality_keys.values() for k in mod_keys]}"
-            )
+                data[key] = self.get_data_by_modality(trajectory_id, modality, key, base_index)
         return data
-
-    def _get_last_vlm_lookback_n(self) -> int:
-        """Get the last used VLM lookback n value."""
-        return self._last_vlm_lookback_n if self._last_vlm_lookback_n is not None else 0
 
     def get_trajectory_data(self, trajectory_id: int) -> pd.DataFrame:
         """Get the data for a trajectory."""
@@ -684,109 +662,6 @@ class LeRobotSingleDataset(Dataset):
             video_backend_kwargs=self.video_backend_kwargs,
         )
 
-    def get_vlm_video(
-        self,
-        trajectory_id: int,
-        key: str,
-        base_index: int,
-    ) -> np.ndarray:
-        """Get the VLM video frames anchored by random lookback steps.
-
-        Randomly choose anchor from t-n steps ago, where n is from [0, 8, 16, 24].
-        If t-n < 0, clamp to 0.
-
-        Args:
-            dataset (BaseSingleDataset): The dataset to retrieve the data from.
-            trajectory_id (str): The ID of the trajectory.
-            key (str): The key of the video.
-            base_index (int): The base index of the trajectory.
-
-        Returns:
-            np.ndarray: The video frames for the trajectory and frame indices. Shape: (T, H, W, C)
-        """
-        # Randomly choose anchor lookback from [0, 8, 16, 24]
-        lookback_steps = [0, 8, 16, 24]
-        n = np.random.choice(lookback_steps)
-        anchor_index = max(0, base_index - n)
-
-        # Store the n value for later retrieval
-        self._last_vlm_lookback_n = n
-
-        # Get the step indices relative to the anchor
-        step_indices = self.delta_indices[key] + anchor_index
-        # Get the trajectory index
-        trajectory_index = self.get_trajectory_index(trajectory_id)
-        # Ensure the indices are within the valid range
-        # This is equivalent to padding the video with extra frames at the beginning and end
-        step_indices = np.maximum(step_indices, 0)
-        step_indices = np.minimum(step_indices, self.trajectory_lengths[trajectory_index] - 1)
-        assert key.startswith("video."), f"Video key must start with 'video.', got {key}"
-        # Get the sub-key
-        key = key.replace("video.", "")
-        video_path = self.get_video_path(trajectory_id, key)
-        # Get the action/state timestamps for each frame in the video
-        assert self.curr_traj_data is not None, f"No data found for {trajectory_id=}"
-        assert "timestamp" in self.curr_traj_data.columns, f"No timestamp found in {trajectory_id=}"
-        timestamp: np.ndarray = self.curr_traj_data["timestamp"].to_numpy()
-        # Get the corresponding video timestamps from the step indices
-        video_timestamp = timestamp[step_indices]
-
-        return get_frames_by_timestamps(
-            video_path.as_posix(),
-            video_timestamp,
-            video_backend=self.video_backend,
-            video_backend_kwargs=self.video_backend_kwargs,
-        )
-
-    # def get_vlm_video(
-    #     self,
-    #     trajectory_id: int,
-    #     key: str,
-    #     base_index: int,
-    # ) -> np.ndarray:
-    #     """Get the VLM video frames with 16 steps back as the anchor.
-
-    #     At time t, the video frames are retrieved from the following indices:
-    #       - [t-16, t-15, ..., t-1]
-    #       - [t, t+1, ..., t+15]
-    #     The total number of frames is 32.
-
-    #     Args:
-    #         dataset (BaseSingleDataset): The dataset to retrieve the data from.
-    #         trajectory_id (str): The ID of the trajectory.
-    #         key (str): The key of the video.
-    #         base_index (int): The base index of the trajectory.
-
-    #     Returns:
-    #         np.ndarray: The video frames for the trajectory and frame indices. Shape: (T, H, W, C)
-    #     """
-    #     # Get the step indices relative to the anchor
-    #     anchor_index = max(0, base_index - 16)
-    #     step_indices = self.delta_indices[key] + anchor_index
-    #     # Get the trajectory index
-    #     trajectory_index = self.get_trajectory_index(trajectory_id)
-    #     # Ensure the indices are within the valid range
-    #     # This is equivalent to padding the video with extra frames at the beginning and end
-    #     step_indices = np.maximum(step_indices, 0)
-    #     step_indices = np.minimum(step_indices, self.trajectory_lengths[trajectory_index] - 1)
-    #     assert key.startswith("video."), f"Video key must start with 'video.', got {key}"
-    #     # Get the sub-key
-    #     key = key.replace("video.", "")
-    #     video_path = self.get_video_path(trajectory_id, key)
-    #     # Get the action/state timestamps for each frame in the video
-    #     assert self.curr_traj_data is not None, f"No data found for {trajectory_id=}"
-    #     assert "timestamp" in self.curr_traj_data.columns, f"No timestamp found in {trajectory_id=}"
-    #     timestamp: np.ndarray = self.curr_traj_data["timestamp"].to_numpy()
-    #     # Get the corresponding video timestamps from the step indices
-    #     video_timestamp = timestamp[step_indices]
-
-    #     return get_frames_by_timestamps(
-    #         video_path.as_posix(),
-    #         video_timestamp,
-    #         video_backend=self.video_backend,
-    #         video_backend_kwargs=self.video_backend_kwargs,
-    #     )
-
     def get_state_or_action(
         self,
         trajectory_id: int,
@@ -827,6 +702,11 @@ class LeRobotSingleDataset(Dataset):
         assert self.curr_traj_data is not None, f"No data found for {trajectory_id=}"
         assert le_key in self.curr_traj_data.columns, f"No {le_key} found in {trajectory_id=}"
         data_array: np.ndarray = np.stack(self.curr_traj_data[le_key])  # type: ignore
+        if data_array.ndim == 1:
+            assert data_array.shape[0] == max_length, (
+                f"Expected 1D array with length {max_length}, got {data_array.shape} array"
+            )
+            data_array = data_array.reshape(-1, 1)
         assert data_array.ndim == 2, f"Expected 2D array, got {data_array.shape} array"
         le_indices = np.arange(
             le_state_or_action_cfg[key].start,
@@ -886,67 +766,6 @@ class LeRobotSingleDataset(Dataset):
             original_key = key
         for i in range(len(step_indices)):
             task_indices.append(self.curr_traj_data[original_key][step_indices[i]].item())
-        # Debug printout to check task descriptions
-        task_descriptions = self.tasks.loc[task_indices]["task"].tolist()
-        # print(f"DEBUG - get_language() for trajectory {trajectory_id}, base_index {base_index}:")
-        # print(f"  Key: {key}")
-        # print(f"  Step indices: {step_indices}")
-        # print(f"  Task indices: {task_indices}")
-        # print(f"  Task descriptions: {task_descriptions}")
-        # print("---")
-
-        return task_descriptions
-
-    def get_vlm_language(
-        self,
-        trajectory_id: int,
-        key: str,
-        base_index: int,
-    ) -> list[str]:
-        """Get the VLM language annotations anchored by random lookback steps.
-
-        Randomly choose anchor from t-n steps ago, where n is from [0, 8, 16, 24].
-        If t-n < 0, clamp to 0.
-
-        Args:
-            dataset (BaseSingleDataset): The dataset to retrieve the data from.
-            trajectory_id (int): The ID of the trajectory.
-            key (str): The key of the annotation.
-            base_index (int): The base index of the trajectory.
-
-        Returns:
-            list[str]: The annotation data for the trajectory and step indices. If no matching data is found, return empty strings.
-        """
-        assert self.curr_traj_data is not None, f"No data found for {trajectory_id=}"
-        # Randomly choose anchor lookback from [0, 8, 16, 24]
-        lookback_steps = [0, 8, 16, 24]
-        n = np.random.choice(lookback_steps)
-        anchor_index = max(0, base_index - n)
-
-        # Get the step indices relative to the anchor
-        step_indices = self.delta_indices[key] + anchor_index
-        # Get the trajectory index
-        trajectory_index = self.get_trajectory_index(trajectory_id)
-        # Get the maximum length of the trajectory
-        max_length = self.trajectory_lengths[trajectory_index]
-        # Get the end times corresponding to the closest indices
-        step_indices = np.maximum(step_indices, 0)
-        step_indices = np.minimum(step_indices, max_length - 1)
-        # Get the annotations
-        task_indices: list[int] = []
-        assert key.startswith("annotation."), f"Language key must start with 'annotation.', got {key}"
-        subkey = key.replace("annotation.", "")
-        annotation_meta = self.lerobot_modality_meta.annotation
-        assert annotation_meta is not None, f"Annotation metadata is None for {subkey}"
-        assert subkey in annotation_meta, (
-            f"Annotation key {subkey} not found in metadata, available annotation keys: {annotation_meta.keys()}"
-        )
-        subkey_meta = annotation_meta[subkey]
-        original_key = subkey_meta.original_key
-        if original_key is None:
-            original_key = key
-        for i in range(len(step_indices)):
-            task_indices.append(self.curr_traj_data[original_key][step_indices[i]].item())
         return self.tasks.loc[task_indices]["task"].tolist()
 
     def get_data_by_modality(
@@ -955,7 +774,6 @@ class LeRobotSingleDataset(Dataset):
         modality: str,
         key: str,
         base_index: int,
-        is_anchored: bool = True,
     ):
         """Get the data corresponding to the modality for a trajectory by a base index.
         This method will call the corresponding helper method based on the modality.
@@ -969,24 +787,14 @@ class LeRobotSingleDataset(Dataset):
             key (str): The key of the data.
             base_index (int): The base index of the trajectory.
         """
-        if is_anchored:
-            if modality == "video":
-                return self.get_vlm_video(trajectory_id, key, base_index)
-            elif modality == "state" or modality == "action":
-                return self.get_state_or_action(trajectory_id, modality, key, base_index)
-            elif modality == "language":
-                return self.get_vlm_language(trajectory_id, key, base_index)
-            else:
-                raise ValueError(f"Invalid modality: {modality}")
+        if modality == "video":
+            return self.get_video(trajectory_id, key, base_index)
+        elif modality == "state" or modality == "action":
+            return self.get_state_or_action(trajectory_id, modality, key, base_index)
+        elif modality == "language":
+            return self.get_language(trajectory_id, key, base_index)
         else:
-            if modality == "video":
-                return self.get_video(trajectory_id, key, base_index)
-            elif modality == "state" or modality == "action":
-                return self.get_state_or_action(trajectory_id, modality, key, base_index)
-            elif modality == "language":
-                return self.get_language(trajectory_id, key, base_index)
-            else:
-                raise ValueError(f"Invalid modality: {modality}")
+            raise ValueError(f"Invalid modality: {modality}")
 
 
 class CachedLeRobotSingleDataset(LeRobotSingleDataset):
