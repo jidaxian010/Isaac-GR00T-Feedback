@@ -26,6 +26,7 @@ from gr00t.model.action_head.action_encoder import (
     SinusoidalPositionalEncoding,
     swish,
 )
+from gr00t.model.action_head.obs_encoder import ObsEncoder
 
 from .cross_attention_dit import DiT, SelfAttentionTransformer
 
@@ -34,14 +35,19 @@ class CategorySpecificLinear(nn.Module):
     def __init__(self, num_categories, input_dim, hidden_dim):
         super().__init__()
         self.num_categories = num_categories
-        # For each category, we have separate weights and biases.
-        self.W = nn.Parameter(0.02 * torch.randn(num_categories, input_dim, hidden_dim))
+
+        # Use Xavier/Glorot initialization for better gradient flow
+        init_scale = (2.0 / (input_dim + hidden_dim)) ** 0.5
+        self.W = nn.Parameter(init_scale * torch.randn(num_categories, input_dim, hidden_dim))
         self.b = nn.Parameter(torch.zeros(num_categories, hidden_dim))
 
     def forward(self, x, cat_ids):
         selected_W = self.W[cat_ids]
         selected_b = self.b[cat_ids]
-        return torch.bmm(x, selected_W) + selected_b.unsqueeze(1)
+
+        result = torch.bmm(x, selected_W) + selected_b.unsqueeze(1)
+
+        return result
 
 
 class CategorySpecificMLP(nn.Module):
@@ -170,6 +176,8 @@ class FlowmatchingActionHead(nn.Module):
             output_dim=self.input_embedding_dim,
         )
 
+        # Obs encoder for processing observation images
+        self.obs_encoder_alone = ObsEncoder(emb_dim=self.input_embedding_dim)  # Direct 1536 output
         self.action_encoder = MultiEmbodimentActionEncoder(
             action_dim=config.action_dim,
             hidden_size=self.input_embedding_dim,
@@ -211,8 +219,13 @@ class FlowmatchingActionHead(nn.Module):
                 self.position_embedding.requires_grad_(False)
         if not tune_diffusion_model:
             self.model.requires_grad_(False)
+
+        # Always ensure the obs_encoder is trainable
+        self.obs_encoder_alone.requires_grad_(True)
+
         print(f"Tune action head projector: {self.tune_projector}")
         print(f"Tune action head diffusion model: {self.tune_diffusion_model}")
+        print("Obs encoder is always trainable")
         # Check if any parameters are still trainable. If not, print a warning.
         if not tune_projector and not tune_diffusion_model:
             for name, p in self.named_parameters():
@@ -279,12 +292,17 @@ class FlowmatchingActionHead(nn.Module):
         # Get vision and language embeddings.
         vl_embs = backbone_output.backbone_features
         device = vl_embs.device
+        print(f"[DEBUG] previous vlm_embs: range=[{vl_embs.min().item():.6f}, {vl_embs.max().item():.6f}]")
 
         # Get embodiment ID.
         embodiment_id = action_input.embodiment_id
 
-        # Embed state.
+        # Embed state
         state_features = self.state_encoder(action_input.state, embodiment_id)
+
+        # Embed obs
+        obs_features = self.obs_encoder_alone(action_input.simple_img)  # (B, 1, 1536)
+        print(f"[DEBUG] obs_features: range=[{obs_features.min().item():.6f}, {obs_features.max().item():.6f}]")
 
         # Embed noised action trajectory.
         actions = action_input.action
@@ -307,7 +325,37 @@ class FlowmatchingActionHead(nn.Module):
 
         # Join vision, language, state and action embedding along sequence dimension.
         future_tokens = self.future_tokens.weight.unsqueeze(0).expand(vl_embs.shape[0], -1, -1)
-        sa_embs = torch.cat((state_features, future_tokens, action_features), dim=1)
+
+        # Get the minimum batch size among all tensors to be concatenated
+        min_len = min(
+            state_features.shape[0],
+            future_tokens.shape[0],
+            action_features.shape[0],
+            obs_features.shape[0],
+        )
+
+        # Slice all tensors to the minimum batch size
+        state_features = state_features[:min_len]
+        future_tokens = future_tokens[:min_len]
+        action_features = action_features[:min_len]
+        obs_features = obs_features[:min_len]
+
+        # Debug printout
+        if not (
+            state_features.shape[0] == future_tokens.shape[0] == action_features.shape[0] == obs_features.shape[0]
+        ):
+            print(
+                f"[DEBUG] Batch size mismatch after slicing! "
+                f"state_features: {state_features.shape}, "
+                f"future_tokens: {future_tokens.shape}, "
+                f"action_features: {action_features.shape}, "
+                f"obs_features_normalized: {obs_features.shape}"
+            )
+        else:
+            pass
+
+        # Add obs features to sa_embs: state + future_tokens + obs + actions
+        sa_embs = torch.cat((state_features, future_tokens, obs_features, action_features), dim=1)
 
         vl_attn_mask = backbone_output.backbone_attention_mask
 
@@ -323,6 +371,12 @@ class FlowmatchingActionHead(nn.Module):
 
         # Slice out only the action portion of pred and target.
         action_mask = action_input.action_mask
+
+        # print("pred_actions:", pred_actions)
+        # print("velocity:", velocity)
+        # print("action_mask:", action_mask)
+        # print("loss (before reduction):", F.mse_loss(pred_actions, velocity, reduction="none"))
+
         loss = F.mse_loss(pred_actions, velocity, reduction="none") * action_mask
         loss = loss.sum() / action_mask.sum()
         output_dict = {
@@ -338,8 +392,8 @@ class FlowmatchingActionHead(nn.Module):
         vl_embs = backbone_output.backbone_features
         embodiment_id = action_input.embodiment_id
 
-        # Embed state.
-        state_features = self.state_encoder(action_input.state, embodiment_id)
+        state_features = self.state_encoder(action_input.state, embodiment_id)  # old encoder
+        obs_features = self.obs_encoder_alone(action_input.simple_img)  # (B, 1, 1536)
 
         # Set initial actions as the sampled noise.
         batch_size = vl_embs.shape[0]
@@ -369,7 +423,8 @@ class FlowmatchingActionHead(nn.Module):
 
             # Join vision, language, state and action embedding along sequence dimension.
             future_tokens = self.future_tokens.weight.unsqueeze(0).expand(vl_embs.shape[0], -1, -1)
-            sa_embs = torch.cat((state_features, future_tokens, action_features), dim=1)
+            # Add obs features to sa_embs: state + future_tokens + obs + actions
+            sa_embs = torch.cat((state_features, future_tokens, obs_features, action_features), dim=1)
 
             # Run model forward.
             model_output = self.model(
