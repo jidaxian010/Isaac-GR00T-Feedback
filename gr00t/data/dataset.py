@@ -665,6 +665,55 @@ class LeRobotSingleDataset(Dataset):
             video_backend_kwargs=self.video_backend_kwargs,
         )
 
+    def get_vlm_video(
+        self,
+        trajectory_id: int,
+        key: str,
+        base_index: int,
+    ) -> np.ndarray:
+        """Get the video frames for a trajectory by a base index.
+
+        Args:
+            dataset (BaseSingleDataset): The dataset to retrieve the data from.
+            trajectory_id (str): The ID of the trajectory.
+            key (str): The key of the video.
+            base_index (int): The base index of the trajectory.
+
+        Returns:
+            np.ndarray: The video frames for the trajectory and frame indices. Shape: (T, H, W, C)
+        """
+        lookback_steps = [0, 8, 16, 24]
+        n = np.random.choice(lookback_steps)
+        anchor_index = max(0, base_index - n)
+
+        self._last_vlm_lookback_n = n
+
+        step_indices = self.delta_indices[key] + anchor_index
+        # print(f"{n=}")
+        # Get the trajectory index
+        trajectory_index = self.get_trajectory_index(trajectory_id)
+        # Ensure the indices are within the valid range
+        # This is equivalent to padding the video with extra frames at the beginning and end
+        step_indices = np.maximum(step_indices, 0)
+        step_indices = np.minimum(step_indices, self.trajectory_lengths[trajectory_index] - 1)
+        assert key.startswith("video."), f"Video key must start with 'video.', got {key}"
+        # Get the sub-key
+        key = key.replace("video.", "")
+        video_path = self.get_video_path(trajectory_id, key)
+        # Get the action/state timestamps for each frame in the video
+        assert self.curr_traj_data is not None, f"No data found for {trajectory_id=}"
+        assert "timestamp" in self.curr_traj_data.columns, f"No timestamp found in {trajectory_id=}"
+        timestamp: np.ndarray = self.curr_traj_data["timestamp"].to_numpy()
+        # Get the corresponding video timestamps from the step indices
+        video_timestamp = timestamp[step_indices]
+
+        return get_frames_by_timestamps(
+            video_path.as_posix(),
+            video_timestamp,
+            video_backend=self.video_backend,
+            video_backend_kwargs=self.video_backend_kwargs,
+        )
+
     def get_state_or_action(
         self,
         trajectory_id: int,
@@ -790,7 +839,11 @@ class LeRobotSingleDataset(Dataset):
             key (str): The key of the data.
             base_index (int): The base index of the trajectory.
         """
-        if modality == "video":
+        if key == "video.agentview_rgb":
+            return self.get_vlm_video(trajectory_id, key, base_index)
+        elif key == "video.eye_in_hand_rgb":
+            return self.get_video(trajectory_id, key, base_index)
+        elif modality == "video":
             return self.get_video(trajectory_id, key, base_index)
         elif modality == "state" or modality == "action":
             return self.get_state_or_action(trajectory_id, modality, key, base_index)
