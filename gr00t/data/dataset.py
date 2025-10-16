@@ -531,6 +531,16 @@ class LeRobotSingleDataset(Dataset):
         if "video.agentview_rgb" not in data:
             raise ValueError(f"video.agentview_rgb should be in data for {data=}")
 
+        # check dimensions too
+        if "video.agentview_rgb" in data:
+            T, H, W, C = data["video.agentview_rgb"].shape
+            assert T == 1, f"video.agentview_rgb should have T=1, got T={T}"
+        if "obs.eye_in_hand_rgb" in data:
+            T, H, W, C = data["obs.eye_in_hand_rgb"].shape
+            assert T == 3, (
+                f"obs.eye_in_hand_rgb should have T=3, got T={T}. Check padding logic in get_obs_video()."
+            )
+
         return data
 
     def get_trajectory_data(self, trajectory_id: int) -> pd.DataFrame:
@@ -665,6 +675,71 @@ class LeRobotSingleDataset(Dataset):
             video_backend_kwargs=self.video_backend_kwargs,
         )
 
+    def get_obs_video(
+        self,
+        trajectory_id: int,
+        key: str,
+        base_index: int,
+    ) -> np.ndarray:
+        """Get the video frames for a trajectory by a base index with proper padding.
+
+        Args:
+            trajectory_id (int): The ID of the trajectory.
+            key (str): The key of the video.
+            base_index (int): The base index of the trajectory.
+
+        Returns:
+            np.ndarray: The video frames for the trajectory and frame indices. Shape: (T, H, W, C)
+        """
+        # Get the step indices
+        # key is already "video.eye_in_hand_rgb", so use it directly
+        original_key = key  # Save original key for delta_indices lookup
+        step_indices = self.delta_indices[key] + base_index
+        # Get the trajectory index
+        trajectory_index = self.get_trajectory_index(trajectory_id)
+        max_trajectory_length = self.trajectory_lengths[trajectory_index]
+
+        # Handle boundary conditions - pad with last frame if exceeding boundary
+        step_indices = np.maximum(step_indices, 0)  # No negative indices
+        overflow_mask = step_indices >= max_trajectory_length
+        step_indices[overflow_mask] = max_trajectory_length - 1
+
+        assert key.startswith("video."), f"Video key must start with 'video.', got {key}"
+        # Get the sub-key
+        key = key.replace("video.", "")
+        video_path = self.get_video_path(trajectory_id, key)
+        # Get the action/state timestamps for each frame in the video
+        assert self.curr_traj_data is not None, f"No data found for {trajectory_id=}"
+        assert "timestamp" in self.curr_traj_data.columns, f"No timestamp found in {trajectory_id=}"
+        timestamp: np.ndarray = self.curr_traj_data["timestamp"].to_numpy()
+        # Get the corresponding video timestamps from the step indices
+        video_timestamp = timestamp[step_indices]
+
+        # Get frames from video
+        frames = get_frames_by_timestamps(
+            video_path.as_posix(),
+            video_timestamp,
+            video_backend=self.video_backend,
+            video_backend_kwargs=self.video_backend_kwargs,
+        )
+
+        # Ensure we have exactly the expected number of frames by padding if necessary
+        expected_frames = len(self.delta_indices[original_key])  # Should be 5 now
+        if frames.shape[0] < expected_frames:
+            # Use the last available frame for padding
+            last_frame = frames[-1:]  # Shape: (1, H, W, C)
+            padding_needed = expected_frames - frames.shape[0]
+            padding_frames = np.repeat(last_frame, padding_needed, axis=0)
+            frames = np.concatenate([frames, padding_frames], axis=0)
+        elif frames.shape[0] > expected_frames:
+            print(
+                f"[WARNING] get_obs_video: got more frames than expected - {frames.shape[0]} > {expected_frames}"
+            )
+            frames = frames[:expected_frames]
+            print(f"[DEBUG] get_obs_video: after trimming, shape={frames.shape}")
+
+        return frames
+
     def get_state_or_action(
         self,
         trajectory_id: int,
@@ -790,7 +865,11 @@ class LeRobotSingleDataset(Dataset):
             key (str): The key of the data.
             base_index (int): The base index of the trajectory.
         """
-        if modality == "video":
+        if key == "video.agentview_rgb":
+            return self.get_video(trajectory_id, key, base_index)
+        elif key == "video.eye_in_hand_rgb":
+            return self.get_obs_video(trajectory_id, key, base_index)
+        elif modality == "video":
             return self.get_video(trajectory_id, key, base_index)
         elif modality == "state" or modality == "action":
             return self.get_state_or_action(trajectory_id, modality, key, base_index)

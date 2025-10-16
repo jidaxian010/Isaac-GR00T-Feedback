@@ -300,9 +300,8 @@ class FlowmatchingActionHead(nn.Module):
         # Embed state
         state_features = self.state_encoder(action_input.state, embodiment_id)
 
-        # Embed obs
-        obs_features = self.obs_encoder_alone(action_input.simple_img)  # (B, 1, 1536)
-        print(f"[DEBUG] obs_features: range=[{obs_features.min().item():.6f}, {obs_features.max().item():.6f}]")
+        # Check obs_encoder fed shape
+        print(f"[DEBUG] obs_encoder fed shape: {action_input.simple_img.shape}")
 
         # Embed noised action trajectory.
         actions = action_input.action
@@ -331,31 +330,25 @@ class FlowmatchingActionHead(nn.Module):
             state_features.shape[0],
             future_tokens.shape[0],
             action_features.shape[0],
-            obs_features.shape[0],
         )
 
         # Slice all tensors to the minimum batch size
         state_features = state_features[:min_len]
         future_tokens = future_tokens[:min_len]
         action_features = action_features[:min_len]
-        obs_features = obs_features[:min_len]
 
         # Debug printout
-        if not (
-            state_features.shape[0] == future_tokens.shape[0] == action_features.shape[0] == obs_features.shape[0]
-        ):
+        if not (state_features.shape[0] == future_tokens.shape[0] == action_features.shape[0]):
             print(
                 f"[DEBUG] Batch size mismatch after slicing! "
                 f"state_features: {state_features.shape}, "
                 f"future_tokens: {future_tokens.shape}, "
                 f"action_features: {action_features.shape}, "
-                f"obs_features_normalized: {obs_features.shape}"
             )
         else:
             pass
 
-        # Add obs features to sa_embs: state + future_tokens + obs + actions
-        sa_embs = torch.cat((state_features, future_tokens, obs_features, action_features), dim=1)
+        sa_embs = torch.cat((state_features, future_tokens, action_features), dim=1)
 
         vl_attn_mask = backbone_output.backbone_attention_mask
 
@@ -393,7 +386,6 @@ class FlowmatchingActionHead(nn.Module):
         embodiment_id = action_input.embodiment_id
 
         state_features = self.state_encoder(action_input.state, embodiment_id)  # old encoder
-        obs_features = self.obs_encoder_alone(action_input.simple_img)  # (B, 1, 1536)
 
         # Set initial actions as the sampled noise.
         batch_size = vl_embs.shape[0]
@@ -423,8 +415,7 @@ class FlowmatchingActionHead(nn.Module):
 
             # Join vision, language, state and action embedding along sequence dimension.
             future_tokens = self.future_tokens.weight.unsqueeze(0).expand(vl_embs.shape[0], -1, -1)
-            # Add obs features to sa_embs: state + future_tokens + obs + actions
-            sa_embs = torch.cat((state_features, future_tokens, obs_features, action_features), dim=1)
+            sa_embs = torch.cat((state_features, future_tokens, action_features), dim=1)
 
             # Run model forward.
             model_output = self.model(

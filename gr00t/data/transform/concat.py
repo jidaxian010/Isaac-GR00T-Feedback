@@ -125,9 +125,9 @@ class ConcatTransform(InvertibleModalityTransform):
             unsqueezed_obs = []
             for obs_key in self.obs_concat_order:
                 obs_data = data.pop(obs_key)
-                unsqueezed = np.expand_dims(obs_data, axis=-4)  # [..., 1, H, W, C]
+                unsqueezed = np.expand_dims(obs_data, axis=-5)  # [..., 1, T, H, W, C]
                 unsqueezed_obs.append(unsqueezed)
-            data["obs"] = np.concatenate(unsqueezed_obs, axis=-4)  # [..., V, H, W, C]
+            data["obs"] = np.concatenate(unsqueezed_obs, axis=-5)  # [..., V, T, H, W, C]
 
         # "state"
         if "state" in grouped_keys:

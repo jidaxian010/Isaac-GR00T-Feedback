@@ -888,7 +888,8 @@ class AgibotGenie1DataConfig:
 
 
 class PandaHandDataConfig(BaseDataConfig):  # libero panda hand
-    video_keys = ["video.agentview_rgb", "video.eye_in_hand_rgb"]  # Both cameras in video modality
+    video_keys = ["video.agentview_rgb"]
+    obs_keys = ["video.eye_in_hand_rgb"]
     state_keys = [
         "state.ee_pos",
         "state.ee_ori",
@@ -900,6 +901,7 @@ class PandaHandDataConfig(BaseDataConfig):  # libero panda hand
 
     language_keys = ["annotation.human.action.task_description"]
     observation_indices = [0]
+    obs_indices = [0, 1, 2]
     action_indices = list(range(16))
 
     def modality_config(self):
@@ -907,7 +909,10 @@ class PandaHandDataConfig(BaseDataConfig):  # libero panda hand
             delta_indices=self.observation_indices,
             modality_keys=self.video_keys,
         )
-
+        obs_modality = ModalityConfig(
+            delta_indices=self.obs_indices,
+            modality_keys=self.obs_keys,
+        )
         state_modality = ModalityConfig(
             delta_indices=self.observation_indices,
             modality_keys=self.state_keys,
@@ -922,6 +927,7 @@ class PandaHandDataConfig(BaseDataConfig):  # libero panda hand
         )
         modality_configs = {
             "video": video_modality,
+            "obs": obs_modality,
             "state": state_modality,
             "action": action_modality,
             "language": language_modality,
@@ -936,18 +942,30 @@ class PandaHandDataConfig(BaseDataConfig):  # libero panda hand
         all_video_like_keys = video_keys_for_vlm + obs_keys
 
         transforms = [
-            # video transforms (apply to both video.* and obs.*)
-            VideoToTensor(apply_to=all_video_like_keys),
-            VideoCrop(apply_to=all_video_like_keys, scale=0.95),
-            VideoResize(apply_to=all_video_like_keys, height=224, width=224, interpolation="linear"),
+            # video transforms (apply separately to avoid mixing different frame counts)
+            VideoToTensor(apply_to=video_keys_for_vlm),
+            VideoCrop(apply_to=video_keys_for_vlm, scale=0.95),
+            VideoResize(apply_to=video_keys_for_vlm, height=224, width=224, interpolation="linear"),
             VideoColorJitter(
-                apply_to=all_video_like_keys,
+                apply_to=video_keys_for_vlm,
                 brightness=0.3,
                 contrast=0.4,
                 saturation=0.5,
                 hue=0.08,
             ),
-            VideoToNumpy(apply_to=all_video_like_keys),
+            VideoToNumpy(apply_to=video_keys_for_vlm),
+            # obs transforms (apply separately)
+            VideoToTensor(apply_to=obs_keys),
+            VideoCrop(apply_to=obs_keys, scale=0.95),
+            VideoResize(apply_to=obs_keys, height=224, width=224, interpolation="linear"),
+            VideoColorJitter(
+                apply_to=obs_keys,
+                brightness=0.3,
+                contrast=0.4,
+                saturation=0.5,
+                hue=0.08,
+            ),
+            VideoToNumpy(apply_to=obs_keys),
             # state transforms
             StateActionToTensor(apply_to=self.state_keys),
             StateActionTransform(
