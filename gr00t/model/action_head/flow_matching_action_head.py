@@ -342,10 +342,7 @@ class FlowmatchingActionHead(nn.Module):
         pred_actions = pred[:, -actions.shape[1] :]
 
         # Return raw actions instead of loss
-        output_dict = {
-            "gt_actions": velocity,
-            "pred_actions": pred_actions
-        }
+        output_dict = {"gt_actions": velocity, "pred_actions": pred_actions}
         return BatchFeature(data=output_dict)
 
     @torch.no_grad()
