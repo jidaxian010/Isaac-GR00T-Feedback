@@ -28,6 +28,7 @@ from .action_head.flow_matching_action_head import (
     FlowmatchingActionHead,
     FlowmatchingActionHeadConfig,
 )
+from .action_head.feedback_action import FeedbackAction
 from .backbone import EagleBackbone
 
 BACKBONE_FEATURE_KEY = "backbone_features"
@@ -80,13 +81,8 @@ class GR00T_N1_5(PreTrainedModel):
 
         self.backbone = EagleBackbone(**config.backbone_cfg)
         action_head_cfg = FlowmatchingActionHeadConfig(**config.action_head_cfg)
-        # # try overriding some data
-        # action_head_cfg.max_num_embodiments = 1
-        # action_head_cfg.action_horizon = 4
-        # print(f"overriding max_num_embodiments: {action_head_cfg.max_num_embodiments}")
-        # print(f"overriding action_horizon: {action_head_cfg.action_horizon}")
-
         self.action_head = FlowmatchingActionHead(action_head_cfg)
+        self.feedback_action = FeedbackAction(action_head_cfg)
 
         self.action_horizon = config.action_horizon
         self.action_dim = config.action_dim
@@ -175,9 +171,10 @@ class GR00T_N1_5(PreTrainedModel):
     ) -> BatchFeature:
         backbone_inputs, action_inputs = self.prepare_input(inputs)
         backbone_outputs = self.backbone(backbone_inputs)
-        action_head_outputs = self.action_head(backbone_outputs, action_inputs)
-        self.validate_data(action_head_outputs, backbone_outputs, is_training=True)
-        return action_head_outputs
+        action_head_outputs = self.action_head(backbone_outputs, action_inputs) # raw 16 action chunk
+        feedback_action_outputs = self.feedback_action(action_head_outputs, window_idx, action_inputs) # 16 feedback action chunk
+        self.validate_data(feedback_action_outputs, backbone_outputs, is_training=True)
+        return feedback_action_outputs # loss
 
     def _detach_batchfeature(self, bf):
         """
@@ -201,26 +198,26 @@ class GR00T_N1_5(PreTrainedModel):
         new_bf.data = detached_data
         return new_bf
 
-    def get_action(
-        self,
-        inputs: dict,
-        time_step: int,
-    ) -> BatchFeature:
-        backbone_inputs, action_inputs = self.prepare_input(inputs)
-        # Because the behavior of backbones remains the same for training and inference, we can use `forward` for backbones.
-        backbone_outputs = self.backbone(backbone_inputs)
-        action_head_outputs = self.action_head.get_action(backbone_outputs, action_inputs)
-        self.validate_data(action_head_outputs, backbone_outputs, is_training=False)
-        return action_head_outputs
+    # def get_action( # 1. Original
+    #     self,
+    #     inputs: dict,
+    #     time_step: int,
+    # ) -> BatchFeature:
+    #     backbone_inputs, action_inputs = self.prepare_input(inputs)
+    #     # Because the behavior of backbones remains the same for training and inference, we can use `forward` for backbones.
+    #     backbone_outputs = self.backbone(backbone_inputs)
+    #     action_head_outputs = self.action_head.get_action(backbone_outputs, action_inputs)
+    #     self.validate_data(action_head_outputs, backbone_outputs, is_training=False)
+    #     return action_head_outputs
 
-    # def get_action(
+    # def get_action( # 2. Skip VLM steps
     #     self,
     #     inputs: dict,
     #     time_step: int,
     # ) -> BatchFeature:
     #     backbone_inputs, action_inputs = self.prepare_input(inputs)
     #     print("Run Fast Model")
-    #     if time_step % 2 == 0:
+    #     if time_step % 4 == 0:
     #         # Run both backbone and action_head
     #         print(f"im at {time_step}, FRESH VLM")
     #         print("320 320 320")
@@ -242,6 +239,19 @@ class GR00T_N1_5(PreTrainedModel):
 
     #         self.validate_data(action_head_outputs, self._cached_backbone_outputs, is_training=False)
     #         return action_head_outputs
+
+    # def get_action( # 3. Update Action, editing
+    #     self,
+    #     inputs: dict,
+    #     time_step: int,
+    # ) -> BatchFeature:
+    #     backbone_inputs, action_inputs = self.prepare_input(inputs)
+    #     # Because the behavior of backbones remains the same for training and inference, we can use `forward` for backbones.
+    #     backbone_outputs = self.backbone(backbone_inputs)
+    #     action_head_outputs = self.action_head.get_action(backbone_outputs, action_inputs)
+    #     action_updater_outputs = self.action_updater(action_head_outputs, action_inputs)
+    #     self.validate_data(action_head_outputs, backbone_outputs, is_training=False)
+    #     return action_head_outputs
 
     def prepare_input(self, inputs) -> Tuple[BatchFeature, BatchFeature]:
         self.validate_inputs(inputs)

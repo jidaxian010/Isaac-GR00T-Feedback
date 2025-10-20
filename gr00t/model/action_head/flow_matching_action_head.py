@@ -176,30 +176,11 @@ class FlowmatchingActionHead(nn.Module):
             output_dim=self.input_embedding_dim,
         )
 
-        # Obs encoder for processing observation images
-        self.obs_encoder_alone = ObsEncoder(emb_dim=256)  # Much smaller output dimension
         self.action_encoder = MultiEmbodimentActionEncoder(
             action_dim=config.action_dim,
             hidden_size=self.input_embedding_dim,
             num_embodiments=config.max_num_embodiments,
         )
-        # Action updater MLP for feedback mechanism - much more stable with smaller input
-        self.action_updater = nn.Sequential(
-            nn.Linear(256 + config.action_dim, 128),  # 256 (obs) + 32 (action) = 288 input
-            nn.ReLU(),
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Linear(64, config.action_dim),
-            nn.Tanh(),  # Bound output to [-1, 1]
-        )
-        # Initialize with extremely small weights to prevent gradient explosion
-        for module in self.action_updater.modules():
-            if isinstance(module, nn.Linear):
-                nn.init.xavier_normal_(module.weight, gain=0.001)  # Even smaller gain
-                nn.init.zeros_(module.bias)
-                # Additional safety: clamp weights to prevent explosion
-                with torch.no_grad():
-                    module.weight.clamp_(-0.1, 0.1)
         self.action_decoder = CategorySpecificMLP(
             num_categories=config.max_num_embodiments,
             input_dim=self.hidden_size,
@@ -237,13 +218,8 @@ class FlowmatchingActionHead(nn.Module):
         if not tune_diffusion_model:
             self.model.requires_grad_(False)
 
-        # Always ensure the obs_encoder is trainable
-        self.obs_encoder_alone.requires_grad_(True)
-        self.action_updater.requires_grad_(True)
-
         print(f"Tune action head projector: {self.tune_projector}")
         print(f"Tune action head diffusion model: {self.tune_diffusion_model}")
-        print("Obs encoder is always trainable")
         # Check if any parameters are still trainable. If not, print a warning.
         if not tune_projector and not tune_diffusion_model:
             for name, p in self.named_parameters():
@@ -365,142 +341,10 @@ class FlowmatchingActionHead(nn.Module):
         pred = self.action_decoder(model_output, embodiment_id)
         pred_actions = pred[:, -actions.shape[1] :]
 
-        # TEMPORARY: Disable feedback mechanism to test stability
-        use_feedback = True  # Set to False to disable feedback, True to enable
-
-        if not use_feedback:
-            # Skip feedback mechanism - use original predictions
-            pass
-        else:
-            # Slice pred_actions from 16 action chunks into 4 chunks, 4 action each
-            action_1 = pred_actions[:, 0:4, :]  # Actions 0-3: no feedback
-            action_2 = pred_actions[:, 4:8, :]  # Actions 4-7: feedback from frame 0
-            action_3 = pred_actions[:, 8:12, :]  # Actions 8-11: feedback from frame 1
-            action_4 = pred_actions[:, 12:16, :]  # Actions 12-15: feedback from frame 2
-
-            # Get observation frames - simple_img shape is [B, V, T, H, W, C]
-            # We need to create proper input for obs_encoder_alone which expects [B, T, V, H, W, C]
-
-            # Extract individual frames and reshape for obs_encoder_alone
-            # simple_img is [B, V, T, H, W, C], we want [B, T, V, H, W, C] for obs_encoder_alone
-            obs_frame_0 = action_input.simple_img[:, :, 0:1, :, :, :]  # [B, V, 1, H, W, C] - first frame
-            obs_frame_1 = action_input.simple_img[:, :, 1:2, :, :, :]  # [B, V, 1, H, W, C] - second frame
-            obs_frame_2 = action_input.simple_img[:, :, 2:3, :, :, :]  # [B, V, 1, H, W, C] - third frame
-
-            # Permute to match obs_encoder_alone expected input: [B, T, V, H, W, C]
-            obs_frame_0 = obs_frame_0.permute(0, 2, 1, 3, 4, 5)  # [B, 1, V, H, W, C]
-            obs_frame_1 = obs_frame_1.permute(0, 2, 1, 3, 4, 5)  # [B, 1, V, H, W, C]
-            obs_frame_2 = obs_frame_2.permute(0, 2, 1, 3, 4, 5)  # [B, 1, V, H, W, C]
-
-            # Encode observation frames
-            obs_features_0 = self.obs_encoder_alone(obs_frame_0).squeeze(1)  # [B, 1, emb_dim] -> [B, emb_dim]
-            obs_features_1 = self.obs_encoder_alone(obs_frame_1).squeeze(1)  # [B, 1, emb_dim] -> [B, emb_dim]
-            obs_features_2 = self.obs_encoder_alone(obs_frame_2).squeeze(1)  # [B, 1, emb_dim] -> [B, emb_dim]
-
-            print(f"obs_features_0_range: {obs_features_0.min():.6f}, {obs_features_0.max():.6f}")
-
-            # Update actions with feedback
-            updated_action_1 = action_1
-
-            # For action chunks 2, 3, 4: apply feedback mechanism
-            # Reshape actions to [B*4, action_dim] and obs_features to [B*4, emb_dim]
-            B = action_2.shape[0]
-            action_2_flat = action_2.contiguous().view(-1, action_2.shape[-1])  # [B*4, action_dim]
-            action_3_flat = action_3.contiguous().view(-1, action_3.shape[-1])  # [B*4, action_dim]
-            action_4_flat = action_4.contiguous().view(-1, action_4.shape[-1])  # [B*4, action_dim]
-
-            obs_features_0_expanded = (
-                obs_features_0.unsqueeze(1).expand(-1, 4, -1).contiguous().view(-1, obs_features_0.shape[-1])
-            )  # [B*4, emb_dim]
-            obs_features_1_expanded = (
-                obs_features_1.unsqueeze(1).expand(-1, 4, -1).contiguous().view(-1, obs_features_1.shape[-1])
-            )  # [B*4, emb_dim]
-            obs_features_2_expanded = (
-                obs_features_2.unsqueeze(1).expand(-1, 4, -1).contiguous().view(-1, obs_features_2.shape[-1])
-            )  # [B*4, emb_dim]
-
-            # Concatenate action and obs features for MLP input
-            action_obs_2 = torch.cat(
-                [action_2_flat, obs_features_0_expanded], dim=-1
-            )  # [B*4, action_dim + emb_dim]
-            action_obs_3 = torch.cat(
-                [action_3_flat, obs_features_1_expanded], dim=-1
-            )  # [B*4, action_dim + emb_dim]
-            action_obs_4 = torch.cat(
-                [action_4_flat, obs_features_2_expanded], dim=-1
-            )  # [B*4, action_dim + emb_dim]
-
-            # Clamp inputs to prevent extreme values
-            action_obs_2 = torch.clamp(action_obs_2, min=-10.0, max=10.0)
-            action_obs_3 = torch.clamp(action_obs_3, min=-10.0, max=10.0)
-            action_obs_4 = torch.clamp(action_obs_4, min=-10.0, max=10.0)
-
-            # Apply action updater MLP with stability checks
-            try:
-                # Apply gradient clipping to the action updater inputs
-                with torch.cuda.amp.autocast(enabled=False):  # Disable mixed precision for this MLP
-                    x = action_obs_2.float()
-
-                    # Check if input has nan/inf
-                    if torch.isnan(x).any() or torch.isinf(x).any():
-                        x = torch.zeros_like(x)
-
-                    # Apply action updater MLP
-                    x = self.action_updater(x)
-
-                    # Check for nan/inf in output
-                    if torch.isnan(x).any() or torch.isinf(x).any():
-                        x = torch.zeros_like(x)
-
-                    action_update_2 = x.view(B, 4, -1)  # [B, 4, action_dim]
-
-                    # For now, just use zeros for the other updates to test
-                    action_update_3 = torch.zeros_like(action_update_2)
-                    action_update_4 = torch.zeros_like(action_update_2)
-
-            except Exception:
-                action_update_2 = torch.zeros(B, 4, action_2.shape[-1], device=action_2.device)
-                action_update_3 = torch.zeros(B, 4, action_3.shape[-1], device=action_3.device)
-                action_update_4 = torch.zeros(B, 4, action_4.shape[-1], device=action_4.device)
-
-            # Check for nan/inf values
-            if torch.isnan(action_update_2).any() or torch.isinf(action_update_2).any():
-                action_update_2 = torch.zeros_like(action_update_2)
-            if torch.isnan(action_update_3).any() or torch.isinf(action_update_3).any():
-                action_update_3 = torch.zeros_like(action_update_3)
-            if torch.isnan(action_update_4).any() or torch.isinf(action_update_4).any():
-                action_update_4 = torch.zeros_like(action_update_4)
-
-            # Scale down the feedback to prevent instability
-            feedback_scale = 0.1  # Small scaling factor
-            action_update_2 = action_update_2 * feedback_scale
-            action_update_3 = action_update_3 * feedback_scale
-            action_update_4 = action_update_4 * feedback_scale
-
-            print(f"action_update2_range: {action_update_2.min():.6f}, {action_update_2.max():.6f}")
-
-            # Add feedback to original actions
-            updated_action_2 = action_2 + action_update_2
-            updated_action_3 = action_3 + action_update_3
-            updated_action_4 = action_4 + action_update_4
-
-            # Concatenate all updated actions
-            pred_actions = torch.cat(
-                (updated_action_1, updated_action_2, updated_action_3, updated_action_4), dim=1
-            )
-
-        # Slice out only the action portion of pred and target.
-        action_mask = action_input.action_mask
-
-        # print("pred_actions:", pred_actions)
-        # print("velocity:", velocity)
-        # print("action_mask:", action_mask)
-        # print("loss (before reduction):", F.mse_loss(pred_actions, velocity, reduction="none"))
-
-        loss = F.mse_loss(pred_actions, velocity, reduction="none") * action_mask
-        loss = loss.sum() / action_mask.sum()
+        # Return raw actions instead of loss
         output_dict = {
-            "loss": loss,
+            "gt_actions": velocity,
+            "pred_actions": pred_actions
         }
         return BatchFeature(data=output_dict)
 
