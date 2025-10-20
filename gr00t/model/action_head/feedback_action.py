@@ -104,6 +104,8 @@ class FeedbackAction(nn.Module):
         # predicted raw action
         pred_actions = action_head_output.pred_actions
 
+        # update action
+
         # compute loss
         action_mask = action_input.action_mask
         loss = F.mse_loss(pred_actions, velocity, reduction="none") * action_mask
