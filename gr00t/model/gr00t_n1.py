@@ -251,7 +251,7 @@ class GR00T_N1_5(PreTrainedModel):
         # Because the behavior of backbones remains the same for training and inference, we can use `forward` for backbones.
         backbone_outputs = self.backbone(backbone_inputs)
         action_head_outputs = self.action_head.get_action(backbone_outputs, action_inputs)
-        feedback_action_outputs = self.feedback_action(action_head_outputs, time_step, action_inputs)
+        feedback_action_outputs = self.feedback_action.get_action(action_head_outputs, time_step, action_inputs)
         self.validate_data(feedback_action_outputs, backbone_outputs, is_training=False)
         return feedback_action_outputs
 

@@ -26,7 +26,6 @@ from gr00t.model.action_head.action_encoder import (
     SinusoidalPositionalEncoding,
     swish,
 )
-from gr00t.model.action_head.obs_encoder import ObsEncoder
 
 from .cross_attention_dit import DiT, SelfAttentionTransformer
 
