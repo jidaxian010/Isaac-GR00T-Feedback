@@ -104,14 +104,14 @@ class FeedbackAction(nn.Module):
     ) -> BatchFeature:
         window_idx = time_step // 4
         if window_idx == 0:
-            pred_actions = action_head_output.pred_actions  # [B, 16, action_dim]
+            pred_actions = action_head_output.action_pred  # [B, 16, action_dim] - use action_pred during inference
             # get the first 4 actions
             action_update = pred_actions[:, :4, :]
             return BatchFeature(data={"action_pred": action_update})
         else:
             # always get the first frame, current frame
             obs_frame = action_input.simple_img[:, :, 0:1, :, :, :]  # sliced obs frame: [B, V, 1, H, W, C]
-            pred_actions = action_head_output.pred_actions  # [B, 16, action_dim]
+            pred_actions = action_head_output.action_pred  # [B, 16, action_dim] - use action_pred during inference
             pred_action_chunk = pred_actions[:, window_idx * 4 : (window_idx + 1) * 4, :]
             action_update = self.action_updater(pred_action_chunk, obs_frame, window_idx)
             return BatchFeature(data={"action_pred": action_update})
