@@ -537,7 +537,7 @@ class LeRobotSingleDataset(Dataset):
             assert T == 1, f"video.agentview_rgb should have T=1, got T={T}"
         if "obs.eye_in_hand_rgb" in data:
             T, H, W, C = data["obs.eye_in_hand_rgb"].shape
-            assert T == 3, (
+            assert T == 4, (
                 f"obs.eye_in_hand_rgb should have T=3, got T={T}. Check padding logic in get_obs_video()."
             )
 

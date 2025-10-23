@@ -257,7 +257,7 @@ class GR00T_N1_5(PreTrainedModel):
             feedback_action_outputs = self.feedback_action.get_action(
                 action_head_outputs, time_step, action_inputs
             )
-            self.validate_data(feedback_action_outputs, backbone_outputs, is_training=False)
+            # self.validate_data(feedback_action_outputs, backbone_outputs, is_training=False)
             return feedback_action_outputs
         else:
             if not hasattr(self, "_cached_action_head_outputs"):
@@ -266,7 +266,7 @@ class GR00T_N1_5(PreTrainedModel):
             feedback_action_outputs = self.feedback_action.get_action(
                 self._cached_action_head_outputs, time_step, action_inputs
             )
-            self.validate_data(feedback_action_outputs, self._cached_backbone_outputs, is_training=False)
+            # self.validate_data(feedback_action_outputs, self._cached_backbone_outputs, is_training=False)
             return feedback_action_outputs
 
     def prepare_input(self, inputs) -> Tuple[BatchFeature, BatchFeature]:

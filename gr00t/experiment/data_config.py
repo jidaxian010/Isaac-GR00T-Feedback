@@ -901,7 +901,7 @@ class PandaHandDataConfig(BaseDataConfig):  # libero panda hand
 
     language_keys = ["annotation.human.action.task_description"]
     observation_indices = [0]
-    obs_indices = [4, 8, 12]
+    obs_indices = [0, 4, 8, 12]
     action_indices = list(range(16))
 
     def modality_config(self):

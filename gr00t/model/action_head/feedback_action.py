@@ -22,33 +22,33 @@ class ActionUpdater(nn.Module):
         )
 
     def forward(self, pred_action_chunk: torch.Tensor, obs_frame: torch.Tensor, window_idx: int) -> torch.Tensor:
-        if window_idx == 0:
-            action_update = pred_action_chunk
-        else:
-            # obs_frame = obs_frame.permute(0, 2, 1, 3, 4, 5)  # [B, V, 1, H, W, C] -> [B, 1, V, H, W, C]
+        """
+        Input: pred_action_chunk: [B, 4, action_dim] (4 actions), obs_frame: [B, V, 1, H, W, C] (1 frame)
+        Output: action_update: [B, 4, action_dim] (4 actions)
+        """
 
-            # self.obs_encoder.eval()
-            obs_features = self.obs_encoder(obs_frame)  # [B, 1, 256]
-            # self.obs_encoder.train()  # Set back to train mode
+        # self.obs_encoder.eval()
+        obs_features = self.obs_encoder(obs_frame)  # [B, 1, 256]
+        # self.obs_encoder.train()  # Set back to train mode
 
-            # Clamp obs_features to prevent extreme values
-            obs_features = torch.clamp(obs_features, min=-10.0, max=10.0)
+        # Clamp obs_features to prevent extreme values
+        obs_features = torch.clamp(obs_features, min=-10.0, max=10.0)
 
-            obs_features = obs_features.expand(-1, 4, -1).contiguous()  # Expanded to [B, 4, 256]
-            action_obs_concat = torch.cat([pred_action_chunk, obs_features], dim=-1)  # [B, 4, 288]
-            B = action_obs_concat.shape[0]
-            action_obs_flat = action_obs_concat.view(-1, action_obs_concat.shape[-1])  # [B*4, 288]
-            delta_action_flat = self.action_updater(action_obs_flat)  # [B*4, action_dim]
-            delta_action = delta_action_flat.view(B, 4, -1)  # [B, 4, action_dim]
-            print(f"window_idx: {window_idx}")
-            print(
-                f"pred_action_chunk shape: {pred_action_chunk.shape}, {pred_action_chunk.min().item()}, {pred_action_chunk.max().item()}"
-            )
-            print(
-                f"delta_action shape: {delta_action.shape}, {delta_action.min().item()}, {delta_action.max().item()}"
-            )
+        obs_features = obs_features.expand(-1, 4, -1).contiguous()  # Expanded to [B, 4, 256]
+        action_obs_concat = torch.cat([pred_action_chunk, obs_features], dim=-1)  # [B, 4, 288]
+        B = action_obs_concat.shape[0]
+        action_obs_flat = action_obs_concat.view(-1, action_obs_concat.shape[-1])  # [B*4, 288]
+        delta_action_flat = self.action_updater(action_obs_flat)  # [B*4, action_dim]
+        delta_action = delta_action_flat.view(B, 4, -1)  # [B, 4, action_dim]
+        print(f"window_idx: {window_idx}")
+        print(
+            f"pred_action_chunk shape: {pred_action_chunk.shape}, {pred_action_chunk.min().item()}, {pred_action_chunk.max().item()}"
+        )
+        print(
+            f"delta_action shape: {delta_action.shape}, {delta_action.min().item()}, {delta_action.max().item()}"
+        )
 
-            action_update = pred_action_chunk + 0.5 * delta_action  # [B, 4, action_dim]
+        action_update = pred_action_chunk + 0.5 * delta_action  # [B, 4, action_dim]
 
         return action_update  # [B, 4, action_dim]
 
@@ -65,6 +65,10 @@ class FeedbackAction(nn.Module):
     def forward(
         self, action_head_output: BatchFeature, time_step: int, action_input: BatchFeature
     ) -> BatchFeature:
+        """
+        Input: action_head_output: BatchFeature, time_step: int, action_input: BatchFeature
+        Output: updated_actions: [B, 16, action_dim]
+        """
         # ground truth action
         velocity = action_head_output.gt_actions
         # predicted raw action
@@ -72,14 +76,12 @@ class FeedbackAction(nn.Module):
 
         # update action
         action_updates = []  # Collect all action updates
-        for i in range(0, pred_actions.shape[1], 4):  # Iterate over action dimension (16 actions)
-            window_idx = i // 4  # action length = 16, window_idx from 0 to 3
-            frame_mapping = [0, 0, 1, 2]
-
-            pred_action_chunk = pred_actions[:, i : i + 4, :]  # sliced action: [B, 4, action_dim]
+        for window_idx in range(0, 4):  # window_idx: 0, 1, 2, 3
+            
             obs_frame = action_input.simple_img[
-                :, :, frame_mapping[window_idx] : frame_mapping[window_idx] + 1, :, :, :
+                :, :, window_idx : window_idx + 1, :, :, :
             ]  # sliced obs frame: [B, V, 1, H, W, C]
+            pred_action_chunk = pred_actions[:, window_idx * 4 : (window_idx + 1) * 4, :]  # sliced action: [B, 4, action_dim]
             action_update = self.action_updater(pred_action_chunk, obs_frame, window_idx)
 
             # # test
@@ -99,19 +101,13 @@ class FeedbackAction(nn.Module):
         }
         return BatchFeature(data=output_dict)
 
-    def get_action(
+    def get_action( 
         self, action_head_output: BatchFeature, time_step: int, action_input: BatchFeature
     ) -> BatchFeature:
-        window_idx = time_step // 4
-        if window_idx == 0:
-            pred_actions = action_head_output.action_pred  # [B, 16, action_dim] - use action_pred during inference
-            # get the first 4 actions
-            action_update = pred_actions[:, :4, :]
-            return BatchFeature(data={"action_pred": action_update})
-        else:
-            # always get the first frame, current frame
-            obs_frame = action_input.simple_img[:, :, 0:1, :, :, :]  # sliced obs frame: [B, V, 1, H, W, C]
-            pred_actions = action_head_output.action_pred  # [B, 16, action_dim] - use action_pred during inference
-            pred_action_chunk = pred_actions[:, window_idx * 4 : (window_idx + 1) * 4, :]
-            action_update = self.action_updater(pred_action_chunk, obs_frame, window_idx)
-            return BatchFeature(data={"action_pred": action_update})
+        window_idx = time_step %4
+        print(f"[FEEDBACK ACTION] at timestep {time_step}, window_idx: {window_idx}")
+        obs_frame = action_input.simple_img # sliced obs frame: [B, V, 1, H, W, C], only one fresh frame
+        pred_actions = action_head_output.action_pred  # [B, 16, action_dim] - use action_pred during inference
+        pred_action_chunk = pred_actions[:, window_idx * 4 : (window_idx + 1) * 4, :]
+        action_update = self.action_updater(pred_action_chunk, obs_frame, window_idx)
+        return BatchFeature(data={"action_pred": action_update})
