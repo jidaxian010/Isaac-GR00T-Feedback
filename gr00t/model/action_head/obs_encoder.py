@@ -157,6 +157,9 @@ class ObsEncoder(nn.Module):
         # Convert to float and normalize to [0,1]
         x = x.float() / 255.0
 
+        # Additional normalization for stability - center around 0
+        x = (x - 0.5) * 2.0  # Now range is [-1, 1]
+
         # CNN encoding
         for i, layer in enumerate(self.encoder):
             x = layer(x)
@@ -165,6 +168,9 @@ class ObsEncoder(nn.Module):
 
         # FC layers
         emb = self.fc(x)  # (B, emb_dim)
+
+        # Normalize output for stability
+        emb = torch.tanh(emb)  # Bound to [-1, 1]
 
         emb = emb.unsqueeze(1)  # (B, 1, emb_dim)
 
