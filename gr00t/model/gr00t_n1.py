@@ -82,9 +82,10 @@ class GR00T_N1_5(PreTrainedModel):
         self.backbone = EagleBackbone(**config.backbone_cfg)
         action_head_cfg = FlowmatchingActionHeadConfig(**config.action_head_cfg)
         self.action_head = FlowmatchingActionHead(action_head_cfg)
+        # FeedbackAction doesn't store action_decoder to avoid duplicate parameters
         self.feedback_action = FeedbackAction(action_head_cfg)
-        # By default, freeze feedback_action (Stage 1 training)
-        self.feedback_action.set_trainable(False)
+        # By default, set feedback_action trainable (pass decoder reference for trainability control)
+        self.feedback_action.set_trainable(True, self.action_head.action_decoder)
 
         self.action_horizon = config.action_horizon
         self.action_dim = config.action_dim
@@ -174,8 +175,9 @@ class GR00T_N1_5(PreTrainedModel):
         backbone_inputs, action_inputs = self.prepare_input(inputs)
         backbone_outputs = self.backbone(backbone_inputs)
         action_head_outputs = self.action_head(backbone_outputs, action_inputs)  # raw 16 action chunk
+        # Pass action_decoder to feedback_action
         feedback_action_outputs = self.feedback_action(
-            action_head_outputs, window_idx, action_inputs
+            action_head_outputs, window_idx, action_inputs, self.action_head.action_decoder
         )  # 16 feedback action chunk
         self.validate_data(feedback_action_outputs, backbone_outputs, is_training=True)
         return feedback_action_outputs  # loss
@@ -256,8 +258,9 @@ class GR00T_N1_5(PreTrainedModel):
             backbone_outputs = self.backbone(backbone_inputs)
             action_head_outputs = self.action_head.get_action(backbone_outputs, action_inputs)
             self._cached_action_head_outputs = action_head_outputs  # save 16 raw actions
+            # Pass action_decoder to feedback_action
             feedback_action_outputs = self.feedback_action.get_action(
-                action_head_outputs, time_step, action_inputs
+                action_head_outputs, time_step, action_inputs, self.action_head.action_decoder
             )
             # self.validate_data(feedback_action_outputs, backbone_outputs, is_training=False)
             return feedback_action_outputs
@@ -265,8 +268,9 @@ class GR00T_N1_5(PreTrainedModel):
             if not hasattr(self, "_cached_action_head_outputs"):
                 raise ValueError(f"No cached action head outputs available at timestep {time_step}")
             print(f"im at {time_step}, Run Obs Update")
+            # Pass action_decoder to feedback_action
             feedback_action_outputs = self.feedback_action.get_action(
-                self._cached_action_head_outputs, time_step, action_inputs
+                self._cached_action_head_outputs, time_step, action_inputs, self.action_head.action_decoder
             )
             # self.validate_data(feedback_action_outputs, self._cached_backbone_outputs, is_training=False)
             return feedback_action_outputs

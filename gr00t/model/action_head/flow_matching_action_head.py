@@ -339,8 +339,12 @@ class FlowmatchingActionHead(nn.Module):
         pred = self.action_decoder(model_output, embodiment_id)
         pred_actions = pred[:, -actions.shape[1] :]
 
-        # Return raw actions instead of loss
-        output_dict = {"gt_actions": velocity, "pred_actions": pred_actions}
+        # Return raw actions, latent features, and ground truth
+        output_dict = {
+            "gt_actions": velocity,
+            "pred_actions": pred_actions,
+            "model_output": model_output,  # Pass latent features for FeedbackAction
+        }
         return BatchFeature(data=output_dict)
 
     @torch.no_grad()
@@ -364,6 +368,9 @@ class FlowmatchingActionHead(nn.Module):
 
         num_steps = self.num_inference_timesteps
         dt = 1.0 / num_steps
+
+        # Initialize model_output
+        model_output = None
 
         # Run denoising steps.
         for t in range(num_steps):
@@ -395,7 +402,9 @@ class FlowmatchingActionHead(nn.Module):
 
             # Update actions using euler integration.
             actions = actions + dt * pred_velocity
-        return BatchFeature(data={"action_pred": actions})
+
+        # Return both actions and final model_output for FeedbackAction
+        return BatchFeature(data={"action_pred": actions, "model_output": model_output})
 
     @property
     def device(self):
