@@ -156,10 +156,7 @@ class FeedbackAction(nn.Module):
         # Slice out only the action latents (last 16 tokens)
         latent_actions = model_output[:, -self.action_horizon :, :]  # [B, 16, 1024]
 
-        # Extract action-related latent features (last 16 tokens)
-        action_latents = model_output[:, -self.action_horizon :, :]  # [B, 16, hidden_size]
-
-        latent_updates = []  # Collect all latent updates
+        action_updates = []  # Collect all action updates
         for window_idx in range(0, 4):  # window_idx: 0, 1, 2, 3
             # Prepare obs_frame
             obs_frame = action_input.simple_img[:, :, window_idx : window_idx + 1, :, :, :]  # [B, V, 1, H, W, C]
