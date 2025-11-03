@@ -319,6 +319,13 @@ class GR00T_N1_5(PreTrainedModel):
 
         pretrained_model = super().from_pretrained(local_model_path, local_model_path=local_model_path, **kwargs)
 
+        # Copy pretrained action_decoder weights to feedback_action's decoder
+        print("Copying pretrained action_decoder weights to feedback_action...")
+        pretrained_model.feedback_action.action_updater.action_decoder.load_state_dict(
+            pretrained_model.action_head.action_decoder.state_dict()
+        )
+        print("Pretrained decoder weights copied successfully!")
+
         pretrained_model.backbone.set_trainable_parameters(tune_visual=tune_visual, tune_llm=tune_llm)
         pretrained_model.action_head.set_trainable_parameters(
             tune_projector=tune_projector, tune_diffusion_model=tune_diffusion_model

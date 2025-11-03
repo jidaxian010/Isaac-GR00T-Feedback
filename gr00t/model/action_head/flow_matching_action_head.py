@@ -336,15 +336,11 @@ class FlowmatchingActionHead(nn.Module):
             timestep=t_discretized,
             return_all_hidden_states=False,  # NOTE (YL): not using flare now
         )
-        pred = self.action_decoder(model_output, embodiment_id)
-        pred_actions = pred[:, -actions.shape[1] :]
+        # pred = self.action_decoder(model_output, embodiment_id)
+        # pred_actions = pred[:, -actions.shape[1] :]
 
-        # Return raw actions, latent features, and ground truth
-        output_dict = {
-            "gt_actions": velocity,
-            "pred_actions": pred_actions,
-            "model_output": model_output,  # Pass latent features for FeedbackAction
-        }
+        # Return raw actions instead of loss
+        output_dict = {"gt_actions": velocity, "model_output": model_output}
         return BatchFeature(data=output_dict)
 
     @torch.no_grad()
@@ -396,15 +392,13 @@ class FlowmatchingActionHead(nn.Module):
                 encoder_hidden_states=vl_embs,
                 timestep=timesteps_tensor,
             )
-            pred = self.action_decoder(model_output, embodiment_id)
+            # pred = self.action_decoder(model_output, embodiment_id)
 
-            pred_velocity = pred[:, -self.action_horizon :]
+            # pred_velocity = pred[:, -self.action_horizon :]
 
-            # Update actions using euler integration.
-            actions = actions + dt * pred_velocity
-
-        # Return both actions and final model_output for FeedbackAction
-        return BatchFeature(data={"action_pred": actions, "model_output": model_output})
+            # # Update actions using euler integration.
+            # actions = actions + dt * pred_velocity
+        return BatchFeature(data={"model_output": model_output})
 
     @property
     def device(self):

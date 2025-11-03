@@ -3,79 +3,96 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers.feature_extraction_utils import BatchFeature
 from gr00t.model.action_head.obs_encoder import ObsEncoder
+from gr00t.model.action_head.flow_matching_action_head import CategorySpecificMLP
 
 
 class ActionUpdater(nn.Module):
-    def __init__(self, hidden_size: int, obs_emb_dim: int = 256):
+    def __init__(self, hidden_size: int, num_embodiments: int, action_dim: int, obs_emb_dim: int = 256):
         super().__init__()
-        self.hidden_size = hidden_size
-        self.obs_emb_dim = obs_emb_dim
+        self.hidden_size = hidden_size  # 1024 - latent embedding dimension
+        self.action_dim = action_dim  # 32 - final action dimension
+        self.obs_emb_dim = obs_emb_dim  # 256 - observation embedding dimension
+        self.num_embodiments = num_embodiments
 
         self.obs_encoder = ObsEncoder(emb_dim=obs_emb_dim)
-        # Update latent features instead of decoded actions
-        # Use smaller network with proper initialization
+
+        # Update latent features: input is obs (256) + latent (1024) = 1280
         self.latent_updater = nn.Sequential(
-            nn.Linear(obs_emb_dim + hidden_size, 512),  # obs + latent: 256 + 1024 = 1280
-            nn.LayerNorm(512),  # Add layer norm for stability
+            nn.Linear(obs_emb_dim + hidden_size, 512),
+            nn.LayerNorm(512),
             nn.ReLU(),
             nn.Linear(512, 256),
-            nn.LayerNorm(256),  # Add layer norm for stability
+            nn.LayerNorm(256),
             nn.ReLU(),
-            nn.Linear(256, hidden_size),  # Output: hidden_size
+            nn.Linear(256, hidden_size),  # Output: 1024 (same as latent dim)
+        )
+
+        # Decoder: latent (1024) → action (32)
+        self.action_decoder = CategorySpecificMLP(
+            num_categories=num_embodiments,
+            input_dim=hidden_size,
+            hidden_dim=hidden_size,
+            output_dim=action_dim,
         )
 
         # Initialize weights carefully to prevent NaN
         for module in self.latent_updater.modules():
             if isinstance(module, nn.Linear):
-                nn.init.xavier_normal_(module.weight, gain=0.01)  # Very small gain
+                nn.init.xavier_normal_(module.weight, gain=0.01)
                 nn.init.zeros_(module.bias)
 
-    def forward(self, latent_features: torch.Tensor, obs_frame: torch.Tensor, window_idx: int) -> torch.Tensor:
+    def forward(
+        self,
+        latent_chunk: torch.Tensor,
+        obs_frame: torch.Tensor,
+        window_idx: int,
+        embodiment_id: torch.Tensor,
+    ) -> torch.Tensor:
         """
         Input:
-            latent_features: [B, 4, hidden_size] (4 latent action features)
+            latent_chunk: [B, 4, hidden_size=1024] (4 latent action features)
             obs_frame: [B, V, 1, H, W, C] (1 frame)
+            embodiment_id: [B] (embodiment IDs)
         Output:
-            updated_latent: [B, 4, hidden_size]
+            action_update: [B, 4, action_dim=32] (4 real actions)
         """
         obs_features = self.obs_encoder(obs_frame)  # [B, 1, 256]
 
         # Normalize both tensors before concatenation for stable training
-        obs_features_norm = obs_features / (
-            obs_features.norm(dim=-1, keepdim=True) + 1e-8
-        )  # L2 normalize obs_features
-        latent_features_norm = latent_features / (
-            latent_features.norm(dim=-1, keepdim=True) + 1e-8
-        )  # L2 normalize latent_features
+        obs_features_norm = obs_features / (obs_features.norm(dim=-1, keepdim=True) + 1e-8)
+        latent_chunk_norm = latent_chunk / (latent_chunk.norm(dim=-1, keepdim=True) + 1e-8)
 
-        obs_features_norm = obs_features_norm.expand(-1, 4, -1).contiguous()  # Expanded to [B, 4, 256]
-        latent_obs_concat = torch.cat([latent_features_norm, obs_features_norm], dim=-1)  # [B, 4, hidden_size+256]
+        obs_features_norm = obs_features_norm.expand(-1, 4, -1).contiguous()  # [B, 4, 256]
+        latent_obs_concat = torch.cat([latent_chunk_norm, obs_features_norm], dim=-1)  # [B, 4, 1280]
+
         B = latent_obs_concat.shape[0]
-        latent_obs_flat = latent_obs_concat.view(-1, latent_obs_concat.shape[-1])  # [B*4, hidden_size+256]
-        delta_latent_flat = self.latent_updater(latent_obs_flat)  # [B*4, hidden_size]
-        delta_latent = delta_latent_flat.view(B, 4, -1)  # [B, 4, hidden_size]
+        latent_obs_flat = latent_obs_concat.view(-1, latent_obs_concat.shape[-1])  # [B*4, 1280]
+        delta_latent_flat = self.latent_updater(latent_obs_flat)  # [B*4, 1024]
+        delta_latent = delta_latent_flat.view(B, 4, -1)  # [B, 4, 1024]
 
-        # Clamp delta_latent to reasonable range
+        # Clamp delta to reasonable range
         delta_latent = torch.clamp(delta_latent, min=-1.0, max=1.0)
 
-        print(f"window_idx: {window_idx}")
-        print(f"obs_frame shape: {obs_frame.shape}, range: {obs_frame.min().item()}, {obs_frame.max().item()}")
-        print(
-            f"obs_features_norm shape: {obs_features_norm.shape}, range: {obs_features_norm.min().item()}, {obs_features_norm.max().item()}"
-        )
-        print(
-            f"latent_features_norm shape: {latent_features_norm.shape}, range: {latent_features_norm.min().item()}, {latent_features_norm.max().item()}"
-        )
-        print(
-            f"delta_latent shape: {delta_latent.shape}, range: {delta_latent.min().item()}, {delta_latent.max().item()}"
-        )
+        # Update latent features
+        updated_latent = latent_chunk + 0.2 * delta_latent  # [B, 4, 1024]
 
-        updated_latent = latent_features + 0.2 * delta_latent  # [B, 4, hidden_size] - update latent features
+        # Decode to real actions
+        action_update = self.action_decoder(updated_latent, embodiment_id)  # [B, 4, 32]
 
-        print(
-            f"updated_latent shape: {updated_latent.shape}, range: {updated_latent.min().item()}, {updated_latent.max().item()}"
-        )
-        return updated_latent  # [B, 4, hidden_size]
+        if window_idx == 0:
+            print(f"obs_features: {obs_features.shape}, range: {obs_features.min()}, {obs_features.max()}")
+            print(
+                f"obs_features_norm: {obs_features_norm.shape}, range: {obs_features_norm.min()}, {obs_features_norm.max()}"
+            )
+            print(f"latent_chunk: {latent_chunk.shape}, range: {latent_chunk.min()}, {latent_chunk.max()}")
+            print(
+                f"latent_chunk_norm: {latent_chunk_norm.shape}, range: {latent_chunk_norm.min()}, {latent_chunk_norm.max()}"
+            )
+            print(f"delta_latent: {delta_latent.shape}, range: {delta_latent.min()}, {delta_latent.max()}")
+            print(f"updated_latent: {updated_latent.shape}, range: {updated_latent.min()}, {updated_latent.max()}")
+            print(f"action_update: {action_update.shape}, range: {action_update.min()}, {action_update.max()}")
+
+        return action_update  # [B, 4, action_dim]
 
 
 class FeedbackAction(nn.Module):
@@ -85,11 +102,13 @@ class FeedbackAction(nn.Module):
         self.action_horizon = config.action_horizon
         self.hidden_size = config.hidden_size
 
-        # Don't store action_decoder reference here - will be accessed from parent model
-        # This avoids duplicate parameter issues when saving checkpoints
-
-        # Action updater for latent features (already initialized in ActionUpdater.__init__)
-        self.action_updater = ActionUpdater(hidden_size=self.hidden_size, obs_emb_dim=256)
+        # Action updater for applying feedback (includes its own decoder)
+        self.action_updater = ActionUpdater(
+            hidden_size=self.hidden_size,
+            num_embodiments=config.max_num_embodiments,
+            action_dim=self.action_dim,
+            obs_emb_dim=256,
+        )
 
         # Track whether feedback_action is trainable
         self.tune_feedback = True
@@ -130,36 +149,35 @@ class FeedbackAction(nn.Module):
         Input: action_head_output: BatchFeature containing model_output (latent) and gt_actions
         Output: loss after updating latent features and decoding
         """
-        velocity = action_head_output.gt_actions  # ground truth action
-        model_output = action_head_output.model_output  # [B, T, hidden_size] - latent features
         embodiment_id = action_input.embodiment_id
+        velocity = action_head_output.gt_actions  # ground truth action [B, 16, action_dim]
+        model_output = action_head_output.model_output  # [B, 49, hidden_size=1024]
+
+        # Slice out only the action latents (last 16 tokens)
+        latent_actions = model_output[:, -self.action_horizon :, :]  # [B, 16, 1024]
 
         # Extract action-related latent features (last 16 tokens)
         action_latents = model_output[:, -self.action_horizon :, :]  # [B, 16, hidden_size]
 
         latent_updates = []  # Collect all latent updates
         for window_idx in range(0, 4):  # window_idx: 0, 1, 2, 3
-            # prepare obs_frame
-            obs_frame = action_input.simple_img[
-                :, :, window_idx : window_idx + 1, :, :, :
-            ]  # sliced obs frame: [B, V, 1, H, W, C]
-            # prepare latent_chunk
-            latent_chunk = action_latents[
-                :, window_idx * 4 : (window_idx + 1) * 4, :
-            ]  # sliced latent: [B, 4, hidden_size]
+            # Prepare obs_frame
+            obs_frame = action_input.simple_img[:, :, window_idx : window_idx + 1, :, :, :]  # [B, V, 1, H, W, C]
 
-            updated_latent = self.action_updater(latent_chunk, obs_frame, window_idx)
+            # Prepare latent_chunk (4 latent actions for this window)
+            latent_chunk = latent_actions[:, window_idx * 4 : (window_idx + 1) * 4, :]  # [B, 4, 1024]
 
-            latent_updates.append(updated_latent)  # Collect update: [B, 4, hidden_size]
+            # Update latent and decode to actions
+            action_update = self.action_updater(
+                latent_chunk, obs_frame, window_idx, embodiment_id
+            )  # [B, 4, action_dim=32]
 
-        updated_latents = torch.cat(latent_updates, dim=1)  # [B, 16, hidden_size]
+            action_updates.append(action_update)
 
-        # Decode the updated latent features to get actions
-        if action_decoder is None:
-            raise ValueError("action_decoder must be provided to FeedbackAction.forward()")
-        updated_actions = action_decoder(updated_latents, embodiment_id)  # [B, 16, action_dim]
+        # Concatenate 4 windows: 4 × [B, 4, 32] → [B, 16, 32]
+        updated_actions = torch.cat(action_updates, dim=1)  # [B, 16, action_dim]
 
-        # compute loss
+        # Compute loss
         action_mask = action_input.action_mask
         loss = F.mse_loss(updated_actions, velocity, reduction="none") * action_mask
         loss = loss.sum() / action_mask.sum()
@@ -171,23 +189,28 @@ class FeedbackAction(nn.Module):
     def get_action(
         self, action_head_output: BatchFeature, time_step: int, action_input: BatchFeature, action_decoder=None
     ) -> BatchFeature:
+        """
+        Input: action_head_output with model_output, time_step, action_input
+        Output: [B, 4, action_dim] actions for the current window
+        """
         window_idx = time_step % 4
-        # prepare obs_frame
-        obs_frame = action_input.simple_img  # obs frame: [B, V, 1, H, W, C], only one fresh frame at a time
-        # prepare model_output (latent features)
-        model_output = action_head_output.model_output  # [B, T, hidden_size]
         embodiment_id = action_input.embodiment_id
 
-        # Extract action-related latent features (last 16 tokens)
-        action_latents = model_output[:, -self.action_horizon :, :]  # [B, 16, hidden_size]
-        latent_chunk = action_latents[:, window_idx * 4 : (window_idx + 1) * 4, :]  # [B, 4, hidden_size]
+        # Get model output (latent features)
+        model_output = action_head_output.model_output  # [B, 49, hidden_size=1024]
 
-        # Update latent features
-        updated_latent = self.action_updater(latent_chunk, obs_frame, window_idx)
+        # Slice out only the action latents (last 16 tokens)
+        latent_actions = model_output[:, -self.action_horizon :, :]  # [B, 16, 1024]
 
-        # Decode to get actions
-        if action_decoder is None:
-            raise ValueError("action_decoder must be provided to FeedbackAction.get_action()")
-        action_update = action_decoder(updated_latent, embodiment_id)  # [B, 4, action_dim]
+        # Get the latent chunk for this specific window
+        latent_chunk = latent_actions[:, window_idx * 4 : (window_idx + 1) * 4, :]  # [B, 4, 1024]
+
+        # Prepare obs_frame (single fresh observation)
+        obs_frame = action_input.simple_img  # [B, V, 1, H, W, C]
+
+        # Update latent and decode to actions
+        action_update = self.action_updater(
+            latent_chunk, obs_frame, window_idx, embodiment_id
+        )  # [B, 4, action_dim=32]
 
         return BatchFeature(data={"action_pred": action_update})
