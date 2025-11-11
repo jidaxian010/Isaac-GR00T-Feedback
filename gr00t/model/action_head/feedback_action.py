@@ -45,25 +45,24 @@ class ActionUpdater(nn.Module):
 
         # Clamp delta_action to reasonable range
         delta_action = torch.clamp(delta_action, min=-1.0, max=1.0)
-        print(f"window_idx: {window_idx}")
-        print(f"obs_frame shape: {obs_frame.shape}, range: {obs_frame.min().item()}, {obs_frame.max().item()}")
-        print(
-            f"obs_features_norm shape: {obs_features_norm.shape}, range: {obs_features_norm.min().item()}, {obs_features_norm.max().item()}"
-        )
-        print(
-            f"pred_action_chunk_norm shape: {pred_action_chunk_norm.shape}, range: {pred_action_chunk_norm.min().item()}, {pred_action_chunk_norm.max().item()}"
-        )
-        print(
-            f"delta_action shape: {delta_action.shape}, range: {delta_action.min().item()}, {delta_action.max().item()}"
-        )
 
         action_update = (
             pred_action_chunk + 0.2 * delta_action
         )  # [B, 4, action_dim] - clamped delta_action allows larger scale
-
-        print(
-            f"action_update shape: {action_update.shape}, range: {action_update.min().item()}, {action_update.max().item()}"
-        )
+        if window_idx == 0:
+            print("window_idx: ", window_idx)
+            print(
+                f"pred_action_chunk: {pred_action_chunk.shape}, range: {pred_action_chunk.min().item()}, {pred_action_chunk.max().item()}"
+            )
+            print(
+                f"obs_features: {obs_features.shape}, range: {obs_features.min().item()}, {obs_features.max().item()}"
+            )
+            print(
+                f"delta_action: {delta_action.shape}, range: {delta_action.min().item()}, {delta_action.max().item()}"
+            )
+            print(
+                f"action_update: {action_update.shape}, range: {action_update.min().item()}, {action_update.max().item()}"
+            )
         return action_update  # [B, 4, action_dim]
 
 
@@ -109,8 +108,8 @@ class FeedbackAction(nn.Module):
         Input: action_head_output: BatchFeature, time_step: int, action_input: BatchFeature
         Output: updated_actions: [B, 16, action_dim]
         """
-        velocity = action_head_output.gt_actions  # ground truth action
-        pred_actions = action_head_output.pred_actions
+        gt_actions = action_input.action  # ground truth action
+        pred_actions = action_head_output.action_pred
 
         action_updates = []  # Collect all action updates
         for window_idx in range(0, 4):  # window_idx: 0, 1, 2, 3
@@ -128,9 +127,15 @@ class FeedbackAction(nn.Module):
             action_updates.append(action_update)  # Collect update: [B, 4, action_dim]
         updated_actions = torch.cat(action_updates, dim=1)  # [B, 16, action_dim]
 
-        # compute loss
+        updated_actions_normalized = torch.tanh(updated_actions)  # normalize to match gt_actions
+
+        print(
+            f"updated actions_normalized: {updated_actions_normalized.shape}, range: {updated_actions_normalized.min().item()}, {updated_actions_normalized.max().item()}"
+        )
+        print(f"gt_actions: {gt_actions.shape}, range: {gt_actions.min().item()}, {gt_actions.max().item()}")
+
         action_mask = action_input.action_mask
-        loss = F.mse_loss(updated_actions, velocity, reduction="none") * action_mask
+        loss = F.mse_loss(updated_actions_normalized, gt_actions, reduction="none") * action_mask
         loss = loss.sum() / action_mask.sum()
         output_dict = {
             "loss": loss,

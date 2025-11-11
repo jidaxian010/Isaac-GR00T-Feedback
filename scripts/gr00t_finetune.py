@@ -86,6 +86,9 @@ class ArgsConfig:
     tune_diffusion_model: bool = True
     """Whether to fine-tune the diffusion model."""
 
+    tune_stage2: bool = False
+    """If True: tune_projector = False, tune_diffusion_model = False"""
+
     resume: bool = False
     """Whether to resume from a checkpoint."""
 
@@ -191,13 +194,25 @@ def main(config: ArgsConfig):
     # First, get the data config to determine action horizon
     data_action_horizon = len(data_config_cls.action_indices)
 
+    # Handle tune_stage2 logic
+    if config.tune_stage2:
+        print("Stage 2 training enabled: freezing projector and diffusion model, training feedback_action")
+        actual_tune_projector = False
+        actual_tune_diffusion_model = False
+        tune_feedback = True
+    else:
+        actual_tune_projector = config.tune_projector
+        actual_tune_diffusion_model = config.tune_diffusion_model
+        tune_feedback = False
+
     # Load model
     model = GR00T_N1_5.from_pretrained(
         pretrained_model_name_or_path=config.base_model_path,
         tune_llm=config.tune_llm,  # backbone's LLM
         tune_visual=config.tune_visual,  # backbone's vision tower
-        tune_projector=config.tune_projector,  # action head's projector
-        tune_diffusion_model=config.tune_diffusion_model,  # action head's DiT
+        tune_projector=actual_tune_projector,  # action head's projector
+        tune_diffusion_model=actual_tune_diffusion_model,  # action head's DiT
+        tune_feedback=tune_feedback,  # feedback action module
     )
 
     # Update action_horizon to match data config
@@ -232,7 +247,7 @@ def main(config: ArgsConfig):
 
         # Set trainable parameters for the new action head
         model.action_head.set_trainable_parameters(
-            tune_projector=config.tune_projector, tune_diffusion_model=config.tune_diffusion_model
+            tune_projector=actual_tune_projector, tune_diffusion_model=actual_tune_diffusion_model
         )
 
     # Set the model's compute_dtype to bfloat16

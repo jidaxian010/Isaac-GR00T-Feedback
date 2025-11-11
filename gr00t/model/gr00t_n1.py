@@ -83,8 +83,11 @@ class GR00T_N1_5(PreTrainedModel):
         action_head_cfg = FlowmatchingActionHeadConfig(**config.action_head_cfg)
         self.action_head = FlowmatchingActionHead(action_head_cfg)
         self.feedback_action = FeedbackAction(action_head_cfg)
-        # By default, freeze feedback_action (Stage 1 training)
+        # By default, freeze feedback_action (Stage 1 training) - will be set in from_pretrained
         self.feedback_action.set_trainable(False)
+
+        # Track which training stage we're in
+        self.tune_feedback = False  # Will be set by from_pretrained
 
         self.action_horizon = config.action_horizon
         self.action_dim = config.action_dim
@@ -171,13 +174,52 @@ class GR00T_N1_5(PreTrainedModel):
         inputs: dict,
         window_idx: int = None,
     ) -> BatchFeature:
+        if self.tune_feedback:
+            return self.forward_stage2(inputs, window_idx)
+        else:
+            return self.forward_stage1(inputs, window_idx)
+
+    def forward_stage1(
+        self,
+        inputs: dict,
+        window_idx: int = None,
+    ) -> BatchFeature:
+        """Stage 1: Your original forward logic"""
         backbone_inputs, action_inputs = self.prepare_input(inputs)
         backbone_outputs = self.backbone(backbone_inputs)
         action_head_outputs = self.action_head(backbone_outputs, action_inputs)  # raw 16 action chunk
+        self.validate_data(action_head_outputs, backbone_outputs, is_training=True)
+        print("Forward Stage 1")
+        return action_head_outputs  # loss
+
+    def forward_stage2(
+        self,
+        inputs: dict,
+        window_idx: int = None,
+    ) -> BatchFeature:
+        """
+        Stage 2: Train feedback_action with frozen action_head.
+        Gets predicted actions from DiT (with gradients) and updates them with feedback_action.
+        """
+        backbone_inputs, action_inputs = self.prepare_input(inputs)
+
+        # Get backbone outputs (frozen)
+        with torch.no_grad():
+            backbone_outputs = self.backbone(backbone_inputs)
+
+        # Get predicted actions from action_head with gradients enabled
+        # Note: encoder/decoder/DiT should already be frozen via requires_grad=False
+        action_head_outputs = self.action_head.get_predicted_actions(
+            backbone_outputs, action_inputs
+        )  # [B, 16, action_dim] - pure actions from DiT
+
+        # Apply feedback updater (trainable)
         feedback_action_outputs = self.feedback_action(
             action_head_outputs, window_idx, action_inputs
-        )  # 16 feedback action chunk
+        )  # [B, 16, action_dim] - updated actions
+
         self.validate_data(feedback_action_outputs, backbone_outputs, is_training=True)
+        print("Forward Stage 2")
         return feedback_action_outputs  # loss
 
     def _detach_batchfeature(self, bf):
@@ -294,12 +336,14 @@ class GR00T_N1_5(PreTrainedModel):
         tune_llm = kwargs.pop("tune_llm", False)
         tune_projector = kwargs.pop("tune_projector", True)
         tune_diffusion_model = kwargs.pop("tune_diffusion_model", True)
+        tune_feedback = kwargs.pop("tune_feedback", False)
 
         print(f"Loading pretrained dual brain from {pretrained_model_name_or_path}")
         print(f"Tune backbone vision tower: {tune_visual}")
         print(f"Tune backbone LLM: {tune_llm}")
         print(f"Tune action head projector: {tune_projector}")
         print(f"Tune action head DiT: {tune_diffusion_model}")
+        print(f"Tune feedback action: {tune_feedback}")
 
         # get the current model path being downloaded
         try:
@@ -319,6 +363,11 @@ class GR00T_N1_5(PreTrainedModel):
         pretrained_model.action_head.set_trainable_parameters(
             tune_projector=tune_projector, tune_diffusion_model=tune_diffusion_model
         )
+        pretrained_model.feedback_action.set_trainable(tune_feedback)
+
+        # Set the training stage flag to control forward routing
+        pretrained_model.tune_feedback = tune_feedback
+
         return pretrained_model
 
 

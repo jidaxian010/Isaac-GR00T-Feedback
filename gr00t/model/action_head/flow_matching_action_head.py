@@ -339,9 +339,76 @@ class FlowmatchingActionHead(nn.Module):
         pred = self.action_decoder(model_output, embodiment_id)
         pred_actions = pred[:, -actions.shape[1] :]
 
-        # Return raw actions instead of loss
-        output_dict = {"gt_actions": velocity, "pred_actions": pred_actions}
+        # Slice out only the action portion of pred and target.
+        action_mask = action_input.action_mask
+        loss = F.mse_loss(pred_actions, velocity, reduction="none") * action_mask
+        loss = loss.sum() / action_mask.sum()
+        output_dict = {
+            "loss": loss,
+        }
         return BatchFeature(data=output_dict)
+
+    def get_predicted_actions(self, backbone_output: BatchFeature, action_input: BatchFeature) -> BatchFeature:
+        """
+        Get predicted actions using full denoising process WITHOUT @torch.no_grad().
+        This allows gradients to flow through for training downstream modules like feedback_action.
+
+        Returns:
+            BatchFeature with 'action_pred': [B, action_horizon, action_dim]
+        """
+        backbone_output = self.process_backbone_output(backbone_output)
+
+        # Get vision and language embeddings.
+        vl_embs = backbone_output.backbone_features
+        embodiment_id = action_input.embodiment_id
+
+        state_features = self.state_encoder(action_input.state, embodiment_id)
+
+        # Set initial actions as the sampled noise.
+        batch_size = vl_embs.shape[0]
+        device = vl_embs.device
+        actions = torch.randn(
+            size=(batch_size, self.config.action_horizon, self.config.action_dim),
+            dtype=vl_embs.dtype,
+            device=device,
+        )
+
+        num_steps = self.num_inference_timesteps
+        dt = 1.0 / num_steps
+
+        # Run denoising steps.
+        for t in range(num_steps):
+            t_cont = t / float(num_steps)
+            t_discretized = int(t_cont * self.num_timestep_buckets)
+
+            # Embed noised action trajectory.
+            timesteps_tensor = torch.full(size=(batch_size,), fill_value=t_discretized, device=device)
+            action_features = self.action_encoder(actions, timesteps_tensor, embodiment_id)
+
+            # Maybe add position embedding.
+            if self.config.add_pos_embed:
+                pos_ids = torch.arange(action_features.shape[1], dtype=torch.long, device=device)
+                pos_embs = self.position_embedding(pos_ids).unsqueeze(0)
+                action_features = action_features + pos_embs
+
+            # Join vision, language, state and action embedding along sequence dimension.
+            future_tokens = self.future_tokens.weight.unsqueeze(0).expand(vl_embs.shape[0], -1, -1)
+            sa_embs = torch.cat((state_features, future_tokens, action_features), dim=1)
+
+            # Run model forward.
+            model_output = self.model(
+                hidden_states=sa_embs,
+                encoder_hidden_states=vl_embs,
+                timestep=timesteps_tensor,
+            )
+            pred = self.action_decoder(model_output, embodiment_id)
+
+            pred_velocity = pred[:, -self.action_horizon :]
+
+            # Update actions using euler integration.
+            actions = actions + dt * pred_velocity
+
+        return BatchFeature(data={"action_pred": actions})
 
     @torch.no_grad()
     def get_action(self, backbone_output: BatchFeature, action_input: BatchFeature) -> BatchFeature:
