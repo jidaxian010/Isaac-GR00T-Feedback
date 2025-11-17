@@ -93,6 +93,21 @@ class GR00T_N1_5(PreTrainedModel):
         self.action_dim = config.action_dim
         self.compute_dtype = config.compute_dtype
 
+    def train(self, mode=True):
+        """
+        Override train() to ensure frozen modules stay in eval mode during stage 2 training.
+        When tune_feedback=True (stage 2), everything except feedback_action (observer + updater)
+        should be in eval mode, even when HuggingFace trainer calls model.train().
+        """
+        super().train(mode)
+        if mode and self.tune_feedback:
+            # Stage 2 training: set everything to eval mode except feedback_action
+            self.backbone.eval()
+            self.action_head.eval()
+            # Keep feedback_action (observer + updater) in train mode
+            self.feedback_action.train()
+        return self
+
     def validate_inputs(self, inputs):
         # NOTE -- this should be handled internally by the model
         # however, doing that will likely be breaking changes -- so we'll need to do it after the deadline
