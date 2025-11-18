@@ -185,6 +185,12 @@ class FlowmatchingActionHead(nn.Module):
             hidden_dim=self.hidden_size,
             output_dim=self.action_dim,
         )
+        self.action_decoder_new = CategorySpecificMLP(
+            num_categories=config.max_num_embodiments,
+            input_dim=self.hidden_size,
+            hidden_dim=self.hidden_size,
+            output_dim=self.action_dim,
+        )
         self.future_tokens = nn.Embedding(config.num_target_vision_tokens, self.input_embedding_dim)
         nn.init.normal_(self.future_tokens.weight, mean=0.0, std=0.02)
 
@@ -401,9 +407,12 @@ class FlowmatchingActionHead(nn.Module):
                 encoder_hidden_states=vl_embs,
                 timestep=timesteps_tensor,
             )
-            pred = self.action_decoder(model_output, embodiment_id)
-
-            pred_velocity = pred[:, -self.action_horizon :]
+            if t == num_steps - 1:
+                pred = self.action_decoder_new(model_output, embodiment_id)
+                pred_velocity = pred[:, -self.action_horizon :]
+            else:
+                pred = self.action_decoder(model_output, embodiment_id)
+                pred_velocity = pred[:, -self.action_horizon :]
 
             # Update actions using euler integration.
             actions = actions + dt * pred_velocity
@@ -456,8 +465,10 @@ class FlowmatchingActionHead(nn.Module):
                 encoder_hidden_states=vl_embs,
                 timestep=timesteps_tensor,
             )
-            pred = self.action_decoder(model_output, embodiment_id)
-
+            if t == num_steps - 1:
+                pred = self.action_decoder_new(model_output, embodiment_id)
+            else:
+                pred = self.action_decoder(model_output, embodiment_id)
             pred_velocity = pred[:, -self.action_horizon :]
 
             # Update actions using euler integration.

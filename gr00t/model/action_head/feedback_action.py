@@ -111,31 +111,15 @@ class FeedbackAction(nn.Module):
         gt_actions = action_input.action  # ground truth action
         pred_actions = action_head_output.action_pred
 
-        action_updates = []  # Collect all action updates
-        for window_idx in range(0, 4):  # window_idx: 0, 1, 2, 3
-            # prepare obs_frame
-            obs_frame = action_input.simple_img[
-                :, :, window_idx : window_idx + 1, :, :, :
-            ]  # sliced obs frame: [B, V, 1, H, W, C]
-            # prepare pred_action_chunk
-            pred_action_chunk = pred_actions[
-                :, window_idx * 4 : (window_idx + 1) * 4, :
-            ]  # sliced action: [B, 4, action_dim]
+        pred_actions_normalized = torch.tanh(pred_actions)  # normalize to match gt_actions
 
-            action_update = self.action_updater(pred_action_chunk, obs_frame, window_idx)
-
-            action_updates.append(action_update)  # Collect update: [B, 4, action_dim]
-        updated_actions = torch.cat(action_updates, dim=1)  # [B, 16, action_dim]
-
-        updated_actions_normalized = torch.tanh(updated_actions)  # normalize to match gt_actions
-
-        print(
-            f"updated actions_normalized: {updated_actions_normalized.shape}, range: {updated_actions_normalized.min().item()}, {updated_actions_normalized.max().item()}"
-        )
-        print(f"gt_actions: {gt_actions.shape}, range: {gt_actions.min().item()}, {gt_actions.max().item()}")
+        # print(
+        #     f"updated actions_normalized: {pred_actions_normalized.shape}, range: {pred_actions_normalized.min().item()}, {pred_actions_normalized.max().item()}"
+        # )
+        # print(f"gt_actions: {gt_actions.shape}, range: {gt_actions.min().item()}, {gt_actions.max().item()}")
 
         action_mask = action_input.action_mask
-        loss = F.mse_loss(updated_actions_normalized, gt_actions, reduction="none") * action_mask
+        loss = F.mse_loss(pred_actions_normalized, gt_actions, reduction="none") * action_mask
         loss = loss.sum() / action_mask.sum()
         output_dict = {
             "loss": loss,
@@ -145,12 +129,5 @@ class FeedbackAction(nn.Module):
     def get_action(
         self, action_head_output: BatchFeature, time_step: int, action_input: BatchFeature
     ) -> BatchFeature:
-        window_idx = time_step % 4
-        # prepare obs_frame
-        obs_frame = action_input.simple_img  # obs frame: [B, V, 1, H, W, C], only one fresh frame at a time
-        # prepare pred_actions
         pred_actions = action_head_output.action_pred  # [B, 16, action_dim] - use action_pred during inference
-        pred_action_chunk = pred_actions[:, window_idx * 4 : (window_idx + 1) * 4, :]
-
-        action_update = self.action_updater(pred_action_chunk, obs_frame, window_idx)
-        return BatchFeature(data={"action_pred": action_update})
+        return BatchFeature(data={"action_pred": pred_actions})
