@@ -185,6 +185,7 @@ class FlowmatchingActionHead(nn.Module):
             hidden_dim=self.hidden_size,
             output_dim=self.action_dim,
         )
+        # Input: (B, action_horizon, hidden_size) -> Output: (B, action_horizon, action_dim)
         self.action_decoder_new = CategorySpecificMLP(
             num_categories=config.max_num_embodiments,
             input_dim=self.hidden_size,
@@ -408,8 +409,8 @@ class FlowmatchingActionHead(nn.Module):
                 timestep=timesteps_tensor,
             )
             if t == num_steps - 1:
-                pred = self.action_decoder_new(model_output, embodiment_id)
-                pred_velocity = pred[:, -self.action_horizon :]
+                model_output_action = model_output[:, -self.action_horizon :]
+                pred_velocity = self.action_decoder_new(model_output_action, embodiment_id)
             else:
                 pred = self.action_decoder(model_output, embodiment_id)
                 pred_velocity = pred[:, -self.action_horizon :]
@@ -466,10 +467,12 @@ class FlowmatchingActionHead(nn.Module):
                 timestep=timesteps_tensor,
             )
             if t == num_steps - 1:
-                pred = self.action_decoder_new(model_output, embodiment_id)
+                # At last step: use different decoder and slice input for efficiency
+                model_output_action = model_output[:, -self.action_horizon :]
+                pred_velocity = self.action_decoder_new(model_output_action, embodiment_id)
             else:
                 pred = self.action_decoder(model_output, embodiment_id)
-            pred_velocity = pred[:, -self.action_horizon :]
+                pred_velocity = pred[:, -self.action_horizon :]
 
             # Update actions using euler integration.
             actions = actions + dt * pred_velocity
