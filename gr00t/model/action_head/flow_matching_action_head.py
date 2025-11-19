@@ -21,6 +21,7 @@ from torch import nn
 from torch.distributions import Beta
 from transformers import PretrainedConfig
 from transformers.feature_extraction_utils import BatchFeature
+from gr00t.model.action_head.obs_encoder import ObsEncoder
 
 from gr00t.model.action_head.action_encoder import (
     SinusoidalPositionalEncoding,
@@ -59,6 +60,63 @@ class CategorySpecificMLP(nn.Module):
     def forward(self, x, cat_ids):
         hidden = F.relu(self.layer1(x, cat_ids))
         return self.layer2(hidden, cat_ids)
+
+
+class ObserverMLP(nn.Module):
+    """
+    mlp(obs_encoder(obs), x)
+    Combines observation features with model output action features.
+    """
+
+    def __init__(self, num_categories, input_dim, hidden_dim, output_dim):
+        super().__init__()
+        self.num_categories = num_categories
+        # layer1 input_dim is 2*input_dim because we concatenate obs_feature and model_output_action
+        self.layer1 = CategorySpecificLinear(num_categories, 2 * input_dim, hidden_dim)
+        self.layer2 = CategorySpecificLinear(num_categories, hidden_dim, output_dim)
+        self.obs_encoder = ObsEncoder(emb_dim=input_dim)
+
+    def forward(self, model_output_action, obs, cat_ids):
+        """
+        Args:
+            x: model_output_action of shape (B, action_horizon, hidden_size)
+            obs: observation image of shape (B, T, V, H, W, C) or similar
+            cat_ids: embodiment_id of shape (B,)
+        Returns:
+            output of shape (B, action_horizon, action_dim)
+        """
+        # Encode observation: (B, 1, hidden_size)
+        obs_feature = self.obs_encoder(obs)  # (B, 1, hidden_size)
+
+        # Expand obs_feature to match x's sequence length: (B, action_horizon, hidden_size)
+        B, action_horizon, hidden_size = model_output_action.shape
+        obs_feature = obs_feature.expand(B, action_horizon, hidden_size)
+
+        # L2 normalize obs_feature
+        obs_feature_norm = obs_feature / (obs_feature.norm(dim=-1, keepdim=True) + 1e-8)
+
+        # L2 normalize model_output_action
+        model_output_action_norm = model_output_action / (model_output_action.norm(dim=-1, keepdim=True) + 1e-8)
+
+        # Combine obs_feature with model_output_action (concatenate them)
+        combined = torch.cat(
+            [obs_feature_norm, model_output_action_norm], dim=-1
+        )  # (B, action_horizon, 2*hidden_size)
+
+        # Pass through MLP layers
+        hidden = F.relu(self.layer1(combined, cat_ids))  # (B, action_horizon, hidden_dim)
+        output = self.layer2(hidden, cat_ids)  # (B, action_horizon, action_dim)
+
+        # Bound output to [-5, 5] range using tanh (smooth, differentiable)
+        # This preserves gradient flow unlike hard clamping
+        output = torch.tanh(output) * 5.0
+
+        print(f"obs_feature: {obs_feature.shape}, range {obs_feature.min().item()}, {obs_feature.max().item()}")
+        print(
+            f"model_output_action: {model_output_action.shape}, range {model_output_action.min().item()}, {model_output_action.max().item()}"
+        )
+        print(f"output range: {output.shape}, range {output.min().item()}, {output.max().item()}")
+        return output
 
 
 class MultiEmbodimentActionEncoder(nn.Module):
@@ -187,6 +245,12 @@ class FlowmatchingActionHead(nn.Module):
         )
         # Input: (B, action_horizon, hidden_size) -> Output: (B, action_horizon, action_dim)
         self.action_decoder_new = CategorySpecificMLP(
+            num_categories=config.max_num_embodiments,
+            input_dim=self.hidden_size,
+            hidden_dim=self.hidden_size,
+            output_dim=self.action_dim,
+        )
+        self.action_decoder_observe = ObserverMLP(
             num_categories=config.max_num_embodiments,
             input_dim=self.hidden_size,
             hidden_dim=self.hidden_size,
@@ -410,7 +474,14 @@ class FlowmatchingActionHead(nn.Module):
             )
             if t == num_steps - 1:
                 model_output_action = model_output[:, -self.action_horizon :]
-                pred_velocity = self.action_decoder_new(model_output_action, embodiment_id)
+                obs = action_input.simple_img
+                pred_velocity = self.action_decoder_observe(model_output_action, obs, embodiment_id)
+
+                # pred = self.action_decoder(model_output, embodiment_id)
+                # pred_velocity = pred[:, -self.action_horizon :]
+                # print(
+                #     f"pred_velocity: {pred_velocity.shape}, range: {pred_velocity.min().item()}, {pred_velocity.max().item()}"
+                # )
             else:
                 pred = self.action_decoder(model_output, embodiment_id)
                 pred_velocity = pred[:, -self.action_horizon :]
