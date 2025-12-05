@@ -71,9 +71,8 @@ class ObserverMLP(nn.Module):
     def __init__(self, num_categories, input_dim, hidden_dim, output_dim):
         super().__init__()
         self.num_categories = num_categories
-        # Single layer MLP: directly map from concatenated features to output
-        # This makes obs_feature more important since there's less transformation
-        self.layer = CategorySpecificLinear(num_categories, 2 * input_dim, output_dim)
+        # self.layer = CategorySpecificLinear(num_categories, 2 * input_dim, output_dim)
+        self.layer = CategorySpecificMLP(num_categories, 2 * input_dim, hidden_dim, output_dim)
         self.obs_encoder = ObsEncoder(emb_dim=input_dim)
 
     def forward(self, model_output_action, obs, cat_ids):
@@ -436,7 +435,7 @@ class FlowmatchingActionHead(nn.Module):
             device=device,
         )
 
-        num_steps = 2
+        num_steps = 3
         dt = 1.0 / num_steps
 
         # Run denoising steps.
@@ -534,9 +533,9 @@ class FlowmatchingActionHead(nn.Module):
                 timestep=timesteps_tensor,
             )
             if t == num_steps - 1:
-                # At last step: use different decoder and slice input for efficiency
-                pred = self.action_decoder(model_output, embodiment_id)
-                model_output_action = pred[:, -self.action_horizon :]
+                # pred = self.action_decoder(model_output, embodiment_id)
+                # pred_velocity = pred[:, -self.action_horizon :]
+                model_output_action = model_output[:, -self.action_horizon :]
                 obs = action_input.simple_img
                 pred_velocity = self.action_decoder_observe(model_output_action, obs, embodiment_id)
             else:
