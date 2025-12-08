@@ -3,67 +3,56 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers.feature_extraction_utils import BatchFeature
 from gr00t.model.action_head.obs_encoder import ObsEncoder
+from gr00t.model.action_head.flow_matching_action_head import CategorySpecificMLP
+from gr00t.model.action_head.flow_matching_action_head import CategorySpecificLinear
 
 
-class ActionUpdater(nn.Module):
-    def __init__(self, action_dim: int, obs_emb_dim: int = 256):
+class ObserverMLP(nn.Module):
+    """
+    mlp(obs_encoder(obs), x)
+    Combines observation features with model output action features.
+    """
+
+    def __init__(self, num_categories, input_dim, hidden_dim, output_dim):
         super().__init__()
-        self.action_dim = action_dim
-        self.obs_emb_dim = obs_emb_dim
+        self.num_categories = num_categories
+        # Two layer MLP: map from concatenated features to output through hidden layer
+        self.layer = CategorySpecificMLP(num_categories, 2 * input_dim, hidden_dim, output_dim)
+        self.obs_encoder = ObsEncoder(emb_dim=input_dim)
 
-        self.obs_encoder = ObsEncoder(emb_dim=obs_emb_dim)
-        self.action_updater = nn.Sequential(
-            nn.Linear(obs_emb_dim + action_dim, 128),  # obs + action input: 256 + 32 = 288
-            nn.ReLU(),
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Linear(64, action_dim),
+    def forward(self, model_output_action, obs, cat_ids):
+        """
+        Args:
+            x: model_output_action of shape (B, action_horizon, hidden_size)
+            obs: observation image of shape (B, T, V, H, W, C) or similar
+            cat_ids: embodiment_id of shape (B,)
+        Returns:
+            output of shape (B, action_horizon, action_dim)
+        """
+        # Encode observation: (B, 1, hidden_size)
+        print(f"obs: {obs.shape}, range {obs.min().item()}, {obs.max().item()}")
+        obs_feature = self.obs_encoder(obs)  # (B, 1, hidden_size)
+
+        # Expand obs_feature to match x's sequence length: (B, action_horizon, hidden_size)
+        B, action_horizon, hidden_size = model_output_action.shape
+        obs_feature = obs_feature.expand(B, action_horizon, hidden_size)
+
+        # Combine obs_feature with model_output_action (concatenate them)
+        combined = torch.cat([obs_feature, model_output_action], dim=-1)  # (B, action_horizon, 2*hidden_size)
+
+        # Two layer MLP: map to output through hidden layer
+        output = self.layer(combined, cat_ids)  # (B, action_horizon, action_dim)
+
+        # Bound output to [-5, 5] range using tanh (smooth, differentiable)
+        # This preserves gradient flow unlike hard clamping
+        output = torch.tanh(output) * 5.0
+
+        print(f"obs_feature: {obs_feature.shape}, range {obs_feature.min().item()}, {obs_feature.max().item()}")
+        print(
+            f"model_output_action: {model_output_action.shape}, range {model_output_action.min().item()}, {model_output_action.max().item()}"
         )
-
-    def forward(self, pred_action_chunk: torch.Tensor, obs_frame: torch.Tensor, window_idx: int) -> torch.Tensor:
-        """
-        Input: pred_action_chunk: [B, 4, action_dim] (4 actions), obs_frame: [B, V, 1, H, W, C] (1 frame)
-        Output: action_update: [B, 4, action_dim] (4 actions)
-        """
-
-        obs_features = self.obs_encoder(obs_frame)  # [B, 1, 256] - now bounded to [-1, 1]
-
-        # Normalize both tensors before concatenation for stable training
-        obs_features_norm = obs_features / (
-            obs_features.norm(dim=-1, keepdim=True) + 1e-8
-        )  # L2 normalize obs_features
-        pred_action_chunk_norm = pred_action_chunk / (
-            pred_action_chunk.norm(dim=-1, keepdim=True) + 1e-8
-        )  # L2 normalize pred_action_chunk
-
-        obs_features_norm = obs_features_norm.expand(-1, 4, -1).contiguous()  # Expanded to [B, 4, 256]
-        action_obs_concat = torch.cat([pred_action_chunk_norm, obs_features_norm], dim=-1)  # [B, 4, 288]
-        B = action_obs_concat.shape[0]
-        action_obs_flat = action_obs_concat.view(-1, action_obs_concat.shape[-1])  # [B*4, 288]
-        delta_action_flat = self.action_updater(action_obs_flat)  # [B*4, action_dim]
-        delta_action = delta_action_flat.view(B, 4, -1)  # [B, 4, action_dim]
-
-        # Clamp delta_action to reasonable range
-        delta_action = torch.clamp(delta_action, min=-1.0, max=1.0)
-
-        action_update = (
-            pred_action_chunk + 0.2 * delta_action
-        )  # [B, 4, action_dim] - clamped delta_action allows larger scale
-        if window_idx == 0:
-            print("window_idx: ", window_idx)
-            print(
-                f"pred_action_chunk: {pred_action_chunk.shape}, range: {pred_action_chunk.min().item()}, {pred_action_chunk.max().item()}"
-            )
-            print(
-                f"obs_features: {obs_features.shape}, range: {obs_features.min().item()}, {obs_features.max().item()}"
-            )
-            print(
-                f"delta_action: {delta_action.shape}, range: {delta_action.min().item()}, {delta_action.max().item()}"
-            )
-            print(
-                f"action_update: {action_update.shape}, range: {action_update.min().item()}, {action_update.max().item()}"
-            )
-        return action_update  # [B, 4, action_dim]
+        print(f"feedback output range: {output.shape}, range {output.min().item()}, {output.max().item()}")
+        return output
 
 
 class FeedbackAction(nn.Module):
@@ -71,15 +60,14 @@ class FeedbackAction(nn.Module):
         super().__init__()
         self.action_dim = config.action_dim
         self.action_horizon = config.action_horizon
+        self.hidden_size = config.hidden_size
 
-        # Action updater for applying feedback
-        self.action_updater = ActionUpdater(action_dim=self.action_dim, obs_emb_dim=256)
-
-        # Initialize action_updater weights more conservatively
-        for module in self.action_updater.action_updater.modules():
-            if isinstance(module, nn.Linear):
-                nn.init.xavier_normal_(module.weight, gain=0.01)  # Very small gain
-                nn.init.zeros_(module.bias)
+        self.action_decoder_observe = ObserverMLP(
+            num_categories=config.max_num_embodiments,
+            input_dim=self.hidden_size,
+            hidden_dim=self.hidden_size,
+            output_dim=self.action_dim,
+        )
 
         # Track whether feedback_action is trainable
         self.tune_feedback = True
@@ -99,7 +87,7 @@ class FeedbackAction(nn.Module):
         """
         if self.training:
             if not self.tune_feedback:
-                self.action_updater.eval()
+                self.action_decoder_observe.eval()
 
     def forward(
         self, action_head_output: BatchFeature, time_step: int, action_input: BatchFeature
@@ -109,14 +97,16 @@ class FeedbackAction(nn.Module):
         Output: updated_actions: [B, 16, action_dim]
         """
         gt_actions = action_input.action  # ground truth action
-        pred_actions = action_head_output.action_pred
+        final_model_output_action = action_head_output.final_model
+        final_raw_action = action_head_output.final_raw_action
+        dt = action_head_output.dt
+
+        pred_velocity = self.action_decoder_observe(
+            final_model_output_action, action_input.simple_img, action_input.embodiment_id
+        )
+        pred_actions = final_raw_action + dt * pred_velocity
 
         pred_actions_normalized = torch.tanh(pred_actions)  # normalize to match gt_actions
-
-        # print(
-        #     f"updated actions_normalized: {pred_actions_normalized.shape}, range: {pred_actions_normalized.min().item()}, {pred_actions_normalized.max().item()}"
-        # )
-        # print(f"gt_actions: {gt_actions.shape}, range: {gt_actions.min().item()}, {gt_actions.max().item()}")
 
         action_mask = action_input.action_mask
         loss = F.mse_loss(pred_actions_normalized, gt_actions, reduction="none") * action_mask
@@ -129,5 +119,24 @@ class FeedbackAction(nn.Module):
     def get_action(
         self, action_head_output: BatchFeature, time_step: int, action_input: BatchFeature
     ) -> BatchFeature:
-        pred_actions = action_head_output.action_pred  # [B, 16, action_dim] - use action_pred during inference
-        return BatchFeature(data={"action_pred": pred_actions})
+        """
+        Process action prediction during inference, applying action_decoder_observe
+        at the final step similar to training.
+        """
+        # Check if we have the final step information (from flow_matching_action_head)
+        try:
+            final_model_output_action = action_head_output.final_model
+            final_raw_action = action_head_output.final_raw_action
+            dt = action_head_output.dt
+
+            # Apply action_decoder_observe similar to training forward
+            pred_velocity = self.action_decoder_observe(
+                final_model_output_action, action_input.simple_img, action_input.embodiment_id
+            )
+            pred_actions = final_raw_action + dt * pred_velocity
+            pred_actions_normalized = torch.tanh(pred_actions)  # normalize to match gt_actions
+            return BatchFeature(data={"action_pred": pred_actions_normalized})
+        except (AttributeError, KeyError):
+            # Fallback: use action_pred directly if final step info not available
+            pred_actions = action_head_output.action_pred  # [B, 16, action_dim]
+            return BatchFeature(data={"action_pred": pred_actions})

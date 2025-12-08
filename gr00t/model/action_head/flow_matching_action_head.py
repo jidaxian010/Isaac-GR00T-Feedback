@@ -62,54 +62,6 @@ class CategorySpecificMLP(nn.Module):
         return self.layer2(hidden, cat_ids)
 
 
-class ObserverMLP(nn.Module):
-    """
-    mlp(obs_encoder(obs), x)
-    Combines observation features with model output action features.
-    """
-
-    def __init__(self, num_categories, input_dim, hidden_dim, output_dim):
-        super().__init__()
-        self.num_categories = num_categories
-        # self.layer = CategorySpecificLinear(num_categories, 2 * input_dim, output_dim)
-        self.layer = CategorySpecificMLP(num_categories, 2 * input_dim, hidden_dim, output_dim)
-        self.obs_encoder = ObsEncoder(emb_dim=input_dim)
-
-    def forward(self, model_output_action, obs, cat_ids):
-        """
-        Args:
-            x: model_output_action of shape (B, action_horizon, hidden_size)
-            obs: observation image of shape (B, T, V, H, W, C) or similar
-            cat_ids: embodiment_id of shape (B,)
-        Returns:
-            output of shape (B, action_horizon, action_dim)
-        """
-        # Encode observation: (B, 1, hidden_size)
-        print(f"obs: {obs.shape}, range {obs.min().item()}, {obs.max().item()}")
-        obs_feature = self.obs_encoder(obs)  # (B, 1, hidden_size)
-
-        # Expand obs_feature to match x's sequence length: (B, action_horizon, hidden_size)
-        B, action_horizon, hidden_size = model_output_action.shape
-        obs_feature = obs_feature.expand(B, action_horizon, hidden_size)
-
-        # Combine obs_feature with model_output_action (concatenate them)
-        combined = torch.cat([obs_feature, model_output_action], dim=-1)  # (B, action_horizon, 2*hidden_size)
-
-        # Single layer MLP: directly map to output (makes obs_feature more important)
-        output = self.layer(combined, cat_ids)  # (B, action_horizon, action_dim)
-
-        # Bound output to [-5, 5] range using tanh (smooth, differentiable)
-        # This preserves gradient flow unlike hard clamping
-        output = torch.tanh(output) * 5.0
-
-        print(f"obs_feature: {obs_feature.shape}, range {obs_feature.min().item()}, {obs_feature.max().item()}")
-        print(
-            f"model_output_action: {model_output_action.shape}, range {model_output_action.min().item()}, {model_output_action.max().item()}"
-        )
-        print(f"output range: {output.shape}, range {output.min().item()}, {output.max().item()}")
-        return output
-
-
 class MultiEmbodimentActionEncoder(nn.Module):
     def __init__(self, action_dim, hidden_size, num_embodiments):
         super().__init__()
@@ -241,12 +193,7 @@ class FlowmatchingActionHead(nn.Module):
             hidden_dim=self.hidden_size,
             output_dim=self.action_dim,
         )
-        self.action_decoder_observe = ObserverMLP(
-            num_categories=config.max_num_embodiments,
-            input_dim=self.hidden_size,
-            hidden_dim=self.hidden_size,
-            output_dim=self.action_dim,
-        )
+
         self.future_tokens = nn.Embedding(config.num_target_vision_tokens, self.input_embedding_dim)
         nn.init.normal_(self.future_tokens.weight, mean=0.0, std=0.02)
 
@@ -435,8 +382,12 @@ class FlowmatchingActionHead(nn.Module):
             device=device,
         )
 
-        num_steps = 3
+        num_steps = 2
         dt = 1.0 / num_steps
+
+        # Initialize variables for last step
+        final_model_output_action = None
+        final_raw_action = None
 
         # Run denoising steps.
         for t in range(num_steps):
@@ -464,16 +415,10 @@ class FlowmatchingActionHead(nn.Module):
                 timestep=timesteps_tensor,
             )
             if t == num_steps - 1:
-                model_output_action = model_output[:, -self.action_horizon :]
-                obs = action_input.simple_img
-                pred_velocity = self.action_decoder_observe(model_output_action, obs, embodiment_id)
-                print(f"t: {t}")
-                print(
-                    f"pred_velocity: {pred_velocity.shape}, range {pred_velocity.min().item()}, {pred_velocity.max().item()}"
-                )
+                print(f"last step: {t}")
 
-                # pred = self.action_decoder(model_output, embodiment_id)
-                # pred_velocity = pred[:, -self.action_horizon :]
+                final_model_output_action = model_output[:, -self.action_horizon :]
+                final_raw_action = actions
             else:
                 pred = self.action_decoder(model_output, embodiment_id)
                 pred_velocity = pred[:, -self.action_horizon :]
@@ -481,10 +426,11 @@ class FlowmatchingActionHead(nn.Module):
                 print(
                     f"pred_velocity: {pred_velocity.shape}, range {pred_velocity.min().item()}, {pred_velocity.max().item()}"
                 )
-            # Update actions using euler integration.
-            actions = actions + dt * pred_velocity
+                actions = actions + dt * pred_velocity
 
-        return BatchFeature(data={"action_pred": actions})
+        return BatchFeature(
+            data={"final_model": final_model_output_action, "final_raw_action": final_raw_action, "dt": dt}
+        )
 
     @torch.no_grad()
     def get_action(self, backbone_output: BatchFeature, action_input: BatchFeature) -> BatchFeature:
@@ -507,6 +453,10 @@ class FlowmatchingActionHead(nn.Module):
 
         num_steps = self.num_inference_timesteps
         dt = 1.0 / num_steps
+
+        # Initialize variables for final step
+        final_model_output_action = None
+        final_raw_action = None
 
         # Run denoising steps.
         for t in range(num_steps):
@@ -533,18 +483,22 @@ class FlowmatchingActionHead(nn.Module):
                 timestep=timesteps_tensor,
             )
             if t == num_steps - 1:
-                # pred = self.action_decoder(model_output, embodiment_id)
-                # pred_velocity = pred[:, -self.action_horizon :]
-                model_output_action = model_output[:, -self.action_horizon :]
-                obs = action_input.simple_img
-                pred_velocity = self.action_decoder_observe(model_output_action, obs, embodiment_id)
+                # Store information for feedback_action to process
+                final_model_output_action = model_output[:, -self.action_horizon :]
+                final_raw_action = actions
             else:
                 pred = self.action_decoder(model_output, embodiment_id)
                 pred_velocity = pred[:, -self.action_horizon :]
-
-            # Update actions using euler integration.
-            actions = actions + dt * pred_velocity
-        return BatchFeature(data={"action_pred": actions})
+                # Update actions using euler integration.
+                actions = actions + dt * pred_velocity
+        return BatchFeature(
+            data={
+                "action_pred": actions,
+                "final_model": final_model_output_action,
+                "final_raw_action": final_raw_action,
+                "dt": dt,
+            }
+        )
 
     @property
     def device(self):
