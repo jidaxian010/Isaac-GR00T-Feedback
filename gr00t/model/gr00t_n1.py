@@ -301,44 +301,43 @@ class GR00T_N1_5(PreTrainedModel):
     #         self.validate_data(action_head_outputs, self._cached_backbone_outputs, is_training=False)
     #         return action_head_outputs
 
-    # def get_action(  # 3. Update Action
-    #     self,
-    #     inputs: dict,
-    #     time_step: int,
-    # ) -> BatchFeature:
-    #     backbone_inputs, action_inputs = self.prepare_input(inputs)
-    #     if time_step % 4 == 0:  # fixed
-    #         print(f"im at {time_step}, Run Model")
-    #         print("320 320 320")
-    #         backbone_outputs = self.backbone(backbone_inputs)
-    #         action_head_outputs = self.action_head.get_action(backbone_outputs, action_inputs)
-    #         self._cached_action_head_outputs = action_head_outputs  # save 16 raw actions
-    #         feedback_action_outputs = self.feedback_action.get_action(
-    #             action_head_outputs, time_step, action_inputs
-    #         )
-    #         # self.validate_data(feedback_action_outputs, backbone_outputs, is_training=False)
-    #         return feedback_action_outputs
-    #     else:
-    #         if not hasattr(self, "_cached_action_head_outputs"):
-    #             raise ValueError(f"No cached action head outputs available at timestep {time_step}")
-    #         print(f"im at {time_step}, Run Obs Update")
-    #         feedback_action_outputs = self.feedback_action.get_action(
-    #             self._cached_action_head_outputs, time_step, action_inputs
-    #         )
-    #         # self.validate_data(feedback_action_outputs, self._cached_backbone_outputs, is_training=False)
-    #         return feedback_action_outputs
-
-    def get_action(  # 4. Update Latent Velocity
+    def get_action(  # 3. Update Action
         self,
         inputs: dict,
         time_step: int,
     ) -> BatchFeature:
         backbone_inputs, action_inputs = self.prepare_input(inputs)
-        backbone_outputs = self.backbone(backbone_inputs)
-        action_head_outputs = self.action_head.get_action(backbone_outputs, action_inputs)
-        feedback_action_outputs = self.feedback_action.get_action(action_head_outputs, time_step, action_inputs)
-        self.validate_data(action_head_outputs, backbone_outputs, is_training=False)
-        return feedback_action_outputs
+        if time_step % 4 == 0:  # fixed
+            print(f"im at {time_step}, Run Model")
+            backbone_outputs = self.backbone(backbone_inputs)
+            action_head_outputs = self.action_head.get_action(backbone_outputs, action_inputs)
+            self._cached_action_head_outputs = action_head_outputs  # save 16 raw actions
+            feedback_action_outputs = self.feedback_action.get_action(
+                action_head_outputs, time_step, action_inputs
+            )
+            # self.validate_data(feedback_action_outputs, backbone_outputs, is_training=False)
+            return feedback_action_outputs
+        else:
+            if not hasattr(self, "_cached_action_head_outputs"):
+                raise ValueError(f"No cached action head outputs available at timestep {time_step}")
+            print(f"im at {time_step}, Run Obs Update")
+            feedback_action_outputs = self.feedback_action.get_action(
+                self._cached_action_head_outputs, time_step, action_inputs
+            )
+            # self.validate_data(feedback_action_outputs, self._cached_backbone_outputs, is_training=False)
+            return feedback_action_outputs
+
+    # def get_action(  # 4. Update Latent Velocity
+    #     self,
+    #     inputs: dict,
+    #     time_step: int,
+    # ) -> BatchFeature:
+    #     backbone_inputs, action_inputs = self.prepare_input(inputs)
+    #     backbone_outputs = self.backbone(backbone_inputs)
+    #     action_head_outputs = self.action_head.get_action(backbone_outputs, action_inputs)
+    #     feedback_action_outputs = self.feedback_action.get_action(action_head_outputs, time_step, action_inputs)
+    #     self.validate_data(action_head_outputs, backbone_outputs, is_training=False)
+    #     return feedback_action_outputs
 
     def prepare_input(self, inputs) -> Tuple[BatchFeature, BatchFeature]:
         self.validate_inputs(inputs)
