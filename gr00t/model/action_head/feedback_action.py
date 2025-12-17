@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from transformers.feature_extraction_utils import BatchFeature
 from gr00t.model.action_head.obs_encoder import ObsEncoder
 from gr00t.model.action_head.flow_matching_action_head import CategorySpecificMLP
+from gr00t.model.action_head.flow_matching_action_head import CategorySpecificLinear
 
 
 class ObserverMLP(nn.Module):
@@ -19,7 +20,7 @@ class ObserverMLP(nn.Module):
         self.layer = CategorySpecificMLP(num_categories, 2 * input_dim, hidden_dim, output_dim)
         self.obs_encoder = ObsEncoder(emb_dim=input_dim)
 
-    def forward(self, model_output_action, obs, cat_ids, window_idx):
+    def forward(self, model_output_action, obs, cat_ids):
         """
         Args:
             x: model_output_action of shape (B, action_horizon, hidden_size)
@@ -29,6 +30,7 @@ class ObserverMLP(nn.Module):
             output of shape (B, action_horizon, action_dim)
         """
         # Encode observation: (B, 1, hidden_size)
+        print(f"obs: {obs.shape}, range {obs.min().item()}, {obs.max().item()}")
         obs_feature = self.obs_encoder(obs)  # (B, 1, hidden_size)
 
         # Expand obs_feature to match x's sequence length: (B, action_horizon, hidden_size)
@@ -45,15 +47,11 @@ class ObserverMLP(nn.Module):
         # This preserves gradient flow unlike hard clamping
         output = torch.tanh(output) * 5.0
 
-        if window_idx == 0:
-            print(f"window_idx: {window_idx}")
-            print(
-                f"obs_feature: {obs_feature.shape}, range {obs_feature.min().item()}, {obs_feature.max().item()}"
-            )
-            print(
-                f"model_output_action: {model_output_action.shape}, range {model_output_action.min().item()}, {model_output_action.max().item()}"
-            )
-            print(f"feedback output range: {output.shape}, range {output.min().item()}, {output.max().item()}")
+        print(f"obs_feature: {obs_feature.shape}, range {obs_feature.min().item()}, {obs_feature.max().item()}")
+        print(
+            f"model_output_action: {model_output_action.shape}, range {model_output_action.min().item()}, {model_output_action.max().item()}"
+        )
+        print(f"feedback output range: {output.shape}, range {output.min().item()}, {output.max().item()}")
         return output
 
 
@@ -99,39 +97,15 @@ class FeedbackAction(nn.Module):
         Output: updated_actions: [B, 16, action_dim]
         """
         gt_actions = action_input.action  # ground truth action
-        model_output_action = action_head_output.final_model
+        final_model_output_action = action_head_output.final_model
         final_raw_action = action_head_output.final_raw_action
         dt = action_head_output.dt
-        observation = action_input.simple_img
-        embodiment_id = action_input.embodiment_id
 
-        print(
-            f"observation shape: {observation.shape}, range {observation.min().item()}, {observation.max().item()}"
+        pred_velocity = self.action_decoder_observe(
+            final_model_output_action, action_input.simple_img, action_input.embodiment_id
         )
+        pred_actions = final_raw_action + dt * pred_velocity
 
-        pred_actions_frame_list = []
-        # observation shape: [B, V, T, H, W, C] = [16, 1, 4, 224, 224, 3]
-        num_frames = observation.shape[2]  # T = 4
-        for window_idx in range(num_frames):  # for 4 frames
-            # Slice observation: [B, V, 1, H, W, C] = [16, 1, 1, 224, 224, 3]
-            observation_frame = observation[:, :, window_idx : window_idx + 1, :, :, :]
-            # Permute to match ObsEncoder expected format: [B, T, V, H, W, C]
-            observation_frame = observation_frame.permute(0, 2, 1, 3, 4, 5)  # [B, 1, V, H, W, C]
-
-            # Slice model output action: [B, 4, hidden_size] = [16, 4, 1024]
-            model_output_action_frame = model_output_action[:, window_idx * 4 : (window_idx + 1) * 4, :]
-            # Slice final raw action: [B, 4, action_dim] = [16, 4, 32]
-            final_raw_action_frame = final_raw_action[:, window_idx * 4 : (window_idx + 1) * 4, :]
-
-            # Process with ObserverMLP: [B, 4, 32]
-            pred_velocity_frame = self.action_decoder_observe(
-                model_output_action_frame, observation_frame, embodiment_id, window_idx
-            )
-
-            pred_action_frame = final_raw_action_frame + dt * pred_velocity_frame
-            pred_actions_frame_list.append(pred_action_frame)
-
-        pred_actions = torch.cat(pred_actions_frame_list, dim=1)  # [B, 16, 32]
         pred_actions_normalized = torch.tanh(pred_actions)  # normalize to match gt_actions
 
         action_mask = action_input.action_mask
@@ -143,36 +117,26 @@ class FeedbackAction(nn.Module):
         return BatchFeature(data=output_dict)
 
     def get_action(
-        self,
-        action_head_output: BatchFeature,
-        time_step: int,
-        action_input: BatchFeature,
+        self, action_head_output: BatchFeature, time_step: int, action_input: BatchFeature
     ) -> BatchFeature:
         """
-        Input: action_head_output with model_output, time_step, action_input
-        Output: [B, 4, action_dim] actions for the current window
+        Process action prediction during inference, applying action_decoder_observe
+        at the final step similar to training.
         """
-        window_idx = time_step % 4
-        embodiment_id = action_input.embodiment_id
-        model_output_action = action_head_output.final_model
-        final_raw_action = action_head_output.final_raw_action
-        dt = action_head_output.dt
-        observation = action_input.simple_img
+        # Check if we have the final step information (from flow_matching_action_head)
+        try:
+            final_model_output_action = action_head_output.final_model
+            final_raw_action = action_head_output.final_raw_action
+            dt = action_head_output.dt
 
-        observation_frame = observation
-        # Permute to match ObsEncoder expected format: [B, T, V, H, W, C]
-        observation_frame = observation_frame.permute(0, 2, 1, 3, 4, 5)  # [B, 1, V, H, W, C]
-
-        # Slice model output action: [B, 4, hidden_size] = [16, 4, 1024]
-        model_output_action_frame = model_output_action[:, window_idx * 4 : (window_idx + 1) * 4, :]
-        # Slice final raw action: [B, 4, action_dim] = [16, 4, 32]
-        final_raw_action_frame = final_raw_action[:, window_idx * 4 : (window_idx + 1) * 4, :]
-
-        # Process with ObserverMLP: [B, 4, 32]
-        pred_velocity_frame = self.action_decoder_observe(
-            model_output_action_frame, observation_frame, embodiment_id, window_idx
-        )
-
-        pred_action_frame = final_raw_action_frame + dt * pred_velocity_frame  # [B, 4, 32]
-
-        return BatchFeature(data=pred_action_frame)
+            # Apply action_decoder_observe similar to training forward
+            pred_velocity = self.action_decoder_observe(
+                final_model_output_action, action_input.simple_img, action_input.embodiment_id
+            )
+            pred_actions = final_raw_action + dt * pred_velocity
+            pred_actions_normalized = torch.tanh(pred_actions)  # normalize to match gt_actions
+            return BatchFeature(data={"action_pred": pred_actions_normalized})
+        except (AttributeError, KeyError):
+            # Fallback: use action_pred directly if final step info not available
+            pred_actions = action_head_output.action_pred  # [B, 16, action_dim]
+            return BatchFeature(data={"action_pred": pred_actions})
