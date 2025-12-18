@@ -1,198 +1,183 @@
 import torch
 import torch.nn as nn
-from torchvision.models import resnet18, resnet50, ResNet18_Weights, ResNet50_Weights
+import torch.nn.functional as F
 
 
 class ObsEncoder(nn.Module):
-    def __init__(self, emb_dim: int = 512, use_pretrained: bool = True, resnet_type: str = "resnet18"):
+    """
+    DINOv2-based ObsEncoder that returns features with shape (B, 768, 7, 7).
+
+    Input:
+      obs: (B, 3, 224, 224)  float in [0,1] or [0,255]
+
+    Output:
+      feat_7: (B, 768, 7, 7)
+
+    Notes:
+    - Uses HuggingFace `transformers` AutoModel for DINOv2.
+    - Drops CLS token and reshapes patch tokens into a 2D grid.
+    - Pools to 7x7 with adaptive average pooling.
+    - Freezes backbone by default (fast + stable).
+    """
+
+    IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
+    IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
+
+    def __init__(self, model_name: str = "facebook/dinov2-base", freeze: bool = True):
         super().__init__()
-        self.emb_dim = emb_dim
-        self.use_pretrained = use_pretrained
-        self.resnet_type = resnet_type
+        try:
+            from transformers import AutoModel
+        except Exception as e:
+            raise ImportError(
+                "This encoder requires HuggingFace transformers.\nInstall with: pip install transformers"
+            ) from e
 
-        # Load pre-trained ResNet
-        if resnet_type == "resnet18":
-            resnet = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1 if use_pretrained else None)
-            feature_dim = 512  # ResNet18 feature dimension
-        elif resnet_type == "resnet50":
-            resnet = resnet50(weights=ResNet50_Weights.IMAGENET1K_V1 if use_pretrained else None)
-            feature_dim = 2048  # ResNet50 feature dimension
+        self.model_name = model_name
+        self.model = AutoModel.from_pretrained(model_name)
+        hidden = getattr(self.model.config, "hidden_size", None)
+        if hidden != 768:
+            raise ValueError(
+                f"Expected a DINOv2 model with hidden_size=768, but got hidden_size={hidden}. "
+                "Use a base-sized DINOv2 model, e.g. facebook/dinov2-base."
+            )
+
+        self.freeze = freeze
+        self._weights_reloaded = False
+
+        if freeze:
+            for p in self.model.parameters():
+                p.requires_grad = False
+            self.model.eval()
+
+        # Check if weights are valid (skip for meta tensors)
+        self._check_weights()
+
+    def _check_weights(self):
+        """Check if weights are valid (not NaN/Inf)."""
+        sample_param = next(self.model.parameters())
+
+        # Skip if on meta device (loading from checkpoint)
+        if sample_param.device.type == "meta":
+            print("⚠ DINOv2 on meta device - will be loaded from checkpoint")
+            return
+
+        # Check for NaN
+        if torch.isnan(sample_param).any():
+            print("⚠ WARNING: DINOv2 weights contain NaN!")
+            print("  This likely means checkpoint has corrupted DINOv2 weights")
+            print("  Will auto-reload fresh weights on first forward pass")
+
+    def _reload_weights(self):
+        """Reload fresh DINOv2 weights."""
+        print("\n" + "=" * 60)
+        print("Reloading DINOv2 with fresh pretrained weights...")
+        print("=" * 60)
+
+        device = next(self.model.parameters()).device
+
+        # Skip if on meta device
+        if device.type == "meta":
+            print("⚠ Cannot reload: on meta device")
+            return False
+
+        from transformers import AutoModel
+
+        self.model = AutoModel.from_pretrained(self.model_name).to(device)
+
+        if self.freeze:
+            for p in self.model.parameters():
+                p.requires_grad = False
+            self.model.eval()
+
+        # Verify
+        sample_param = next(self.model.parameters())
+        if not torch.isnan(sample_param).any():
+            print(f"✓ DINOv2 reloaded successfully on {device}")
+            print(f"  Sample weight range: [{sample_param.min().item():.3f}, {sample_param.max().item():.3f}]")
+            print("=" * 60 + "\n")
+            return True
         else:
-            raise ValueError(f"Unknown resnet_type: {resnet_type}")
+            print("✗ FAILED: Reloaded weights still contain NaN!")
+            print("=" * 60 + "\n")
+            return False
 
-        # Remove the final fully connected layer and average pooling
-        # Keep everything up to avgpool
-        self.backbone = nn.Sequential(*list(resnet.children())[:-2])  # Remove avgpool and fc
-        self.feature_dim = feature_dim
-
-        # Add adaptive pooling and projection to desired embedding dimension
-        self.pool = nn.AdaptiveAvgPool2d((1, 1))
-        self.projection = nn.Linear(feature_dim, emb_dim)
-
-        # Initialize projection layer
-        nn.init.xavier_uniform_(self.projection.weight)
-        nn.init.zeros_(self.projection.bias)
-
-        # Track if ResNet has been reloaded
-        self._resnet_reloaded = False
-        self._projection_reloaded = False
-
-    def _reload_resnet(self):
-        """Reload ResNet backbone if weights became NaN (e.g., from meta tensor loading)"""
-        # Get current device
-        device = next(self.backbone.parameters()).device
-
-        # Reload pre-trained ResNet
-        if self.resnet_type == "resnet18":
-            resnet = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1 if self.use_pretrained else None)
-        elif self.resnet_type == "resnet50":
-            resnet = resnet50(weights=ResNet50_Weights.IMAGENET1K_V1 if self.use_pretrained else None)
-        else:
-            raise ValueError(f"Unknown resnet_type: {self.resnet_type}")
-
-        # Create new backbone
-        new_backbone = nn.Sequential(*list(resnet.children())[:-2])
-
-        # Copy weights to the same device
-        new_backbone = new_backbone.to(device)
-
-        # Replace the backbone
-        self.backbone = new_backbone
-        self._resnet_reloaded = True
-        print(f"DEBUG: ResNet backbone reloaded successfully on device {device}")
-
-    def _reload_projection(self, device):
-        """Reload projection layer if weights became NaN (e.g., from meta tensor loading)"""
-        # Create new projection layer
-        new_projection = nn.Linear(self.feature_dim, self.emb_dim)
-
-        # Initialize properly
-        nn.init.xavier_uniform_(new_projection.weight)
-        nn.init.zeros_(new_projection.bias)
-
-        # Move to correct device
-        new_projection = new_projection.to(device)
-
-        # Replace the projection
-        self.projection = new_projection
-        self._projection_reloaded = True
-        print(f"DEBUG: Projection layer reloaded successfully on device {device}")
+    def _normalize(self, x: torch.Tensor) -> torch.Tensor:
+        if x.dtype not in (torch.float16, torch.float32, torch.bfloat16):
+            x = x.float()
+        # If input looks like [0,255], rescale to [0,1]
+        if x.max() > 1.5:
+            x = x / 255.0
+        mean = self.IMAGENET_MEAN.to(device=x.device, dtype=x.dtype)
+        std = self.IMAGENET_STD.to(device=x.device, dtype=x.dtype)
+        return (x - mean) / std
 
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
         """
-        Args:
-            obs: Tensor of shape (B, T, V, 224, 224, 3), dtype torch.ByteTensor
-        Returns:
-            emb: Tensor of shape (B, 1, emb_dim)
+        obs: (B, 3, 224, 224)
+        returns: (B, 768, 7, 7)
         """
-        x = obs[:, -1, -1]  # (B, 224, 224, 3), eye-in-hand
+        x = self._normalize(obs)
 
-        # Fix the permute to ensure correct channel dimension
-        if x.shape[-1] == 3:  # If channels are in the last dimension
-            x = x.permute(0, 3, 1, 2).contiguous()  # (B, 3, 224, 224)
-        else:  # If channels are already in the second dimension
-            x = x.contiguous()  # (B, 3, 224, 224)
+        if self.freeze:
+            with torch.no_grad():
+                out = self.model(pixel_values=x)
+        else:
+            out = self.model(pixel_values=x)
 
-        # Convert to float and normalize for ImageNet pre-trained models
-        # ImageNet normalization: mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
-        x = x.float() / 255.0
+        # last_hidden_state: (B, 1 + P, 768) where P is num patch tokens
+        tok = out.last_hidden_state  # (B, 1+P, 768)
+        tok = tok[:, 1:, :]  # drop CLS -> (B, P, 768)
 
-        # Check for NaN/Inf in input
-        if torch.isnan(x).any() or torch.isinf(x).any():
-            print(f"DEBUG: NaN/Inf in x after float conversion!")
-            x = torch.nan_to_num(x, nan=0.5, posinf=1.0, neginf=0.0)
+        B, P, C = tok.shape
+        g = int(P**0.5)
+        if g * g != P:
+            raise ValueError(f"Patch token count P={P} is not a perfect square; can't reshape to grid.")
 
-        mean = torch.tensor([0.485, 0.456, 0.406], device=x.device, dtype=x.dtype).view(1, 3, 1, 1)
-        std = torch.tensor([0.229, 0.224, 0.225], device=x.device, dtype=x.dtype).view(1, 3, 1, 1)
-        x = (x - mean) / std
+        # reshape into (B, 768, g, g)
+        feat = tok.transpose(1, 2).contiguous().view(B, C, g, g)
 
-        # Check after normalization
-        if torch.isnan(x).any() or torch.isinf(x).any():
-            print(f"DEBUG: NaN/Inf in x after normalization! Range: [{x.min().item()}, {x.max().item()}]")
-            x = torch.nan_to_num(x, nan=0.0, posinf=3.0, neginf=-3.0)
+        # pool to (B, 768, 7, 7)
+        features = F.adaptive_avg_pool2d(feat, (7, 7))
 
-        # ResNet backbone
-        features = self.backbone(x)  # (B, feature_dim, H, W)
-
-        # Check after backbone
+        # Check for NaN and auto-reload if needed
         if torch.isnan(features).any() or torch.isinf(features).any():
-            print(
-                f"DEBUG: NaN/Inf in features after backbone! Range: [{features.min().item()}, {features.max().item()}]"
+            print("\n⚠ WARNING: DINOv2 output contains NaN/Inf!")
+            print(f"  Input x range: [{x.min().item():.3f}, {x.max().item():.3f}]")
+            print(f"  Features shape: {features.shape}")
+            print(f"  NaN count: {torch.isnan(features).sum().item()} / {features.numel()}")
+
+            # Try to reload weights once
+            if not self._weights_reloaded:
+                success = self._reload_weights()
+                self._weights_reloaded = True
+
+                if success:
+                    # Retry forward pass
+                    print("Retrying forward pass with fresh weights...")
+                    if self.freeze:
+                        with torch.no_grad():
+                            out = self.model(pixel_values=x)
+                    else:
+                        out = self.model(pixel_values=x)
+
+                    tok = out.last_hidden_state[:, 1:, :]
+                    B, P, C = tok.shape
+                    g = int(P**0.5)
+                    feat = tok.transpose(1, 2).contiguous().view(B, C, g, g)
+                    features = F.adaptive_avg_pool2d(feat, (7, 7))
+
+                    if not torch.isnan(features).any() and not torch.isinf(features).any():
+                        print(
+                            f"✓ SUCCESS! Features range: [{features.min().item():.3f}, {features.max().item():.3f}]\n"
+                        )
+                        return features
+                    else:
+                        print("✗ Still NaN after reload\n")
+
+            raise RuntimeError(
+                "DINOv2 producing NaN values!\n"
+                "This means the checkpoint has corrupted DINOv2 weights.\n"
+                "Solution: Either train from scratch or use a checkpoint without DINOv2 weights."
             )
-            # Check ResNet weights and reload if needed
-            has_nan_weights = False
-            for name, param in self.backbone.named_parameters():
-                if torch.isnan(param).any() or torch.isinf(param).any():
-                    print(f"DEBUG: NaN/Inf in ResNet parameter: {name}")
-                    has_nan_weights = True
 
-            # Reload ResNet if weights are NaN (happens when model is loaded from checkpoint with meta tensors)
-            if has_nan_weights and not self._resnet_reloaded:
-                print(f"DEBUG: Reloading ResNet backbone due to NaN weights...")
-                self._reload_resnet()
-                # Retry forward pass
-                features = self.backbone(x)
-                if torch.isnan(features).any() or torch.isinf(features).any():
-                    print(f"DEBUG: Still NaN after reload, using nan_to_num")
-                    features = torch.nan_to_num(features, nan=0.0, posinf=100.0, neginf=-100.0)
-            else:
-                features = torch.nan_to_num(features, nan=0.0, posinf=100.0, neginf=-100.0)
-
-        # Global average pooling
-        features = self.pool(features)  # (B, feature_dim, 1, 1)
-        features = features.view(features.size(0), -1)  # (B, feature_dim)
-
-        # Check after pooling
-        if torch.isnan(features).any() or torch.isinf(features).any():
-            print(
-                f"DEBUG: NaN/Inf in features after pooling! Range: [{features.min().item()}, {features.max().item()}]"
-            )
-            features = torch.nan_to_num(features, nan=0.0, posinf=100.0, neginf=-100.0)
-
-        # Check projection weights before forward pass
-        if torch.isnan(self.projection.weight).any() or torch.isinf(self.projection.weight).any():
-            if not self._projection_reloaded:
-                print(f"DEBUG: Projection weight has NaN/Inf! Reloading projection layer...")
-                device = next(self.projection.parameters()).device
-                self._reload_projection(device)
-
-        # Project to desired embedding dimension
-        emb = self.projection(features)  # (B, emb_dim)
-
-        # Check after projection
-        if torch.isnan(emb).any() or torch.isinf(emb).any():
-            print(f"DEBUG: NaN/Inf in emb after projection!")
-            print(f"DEBUG: Features range: [{features.min().item()}, {features.max().item()}]")
-            # Check if projection weights are still NaN
-            if torch.isnan(self.projection.weight).any() or torch.isinf(self.projection.weight).any():
-                print(f"DEBUG: Projection weight still has NaN/Inf after reload! Trying reinitialization...")
-                device = next(self.projection.parameters()).device
-                with torch.no_grad():
-                    # Try to reinitialize in-place
-                    self.projection.weight.data = torch.randn_like(self.projection.weight.data)
-                    nn.init.xavier_uniform_(self.projection.weight)
-                    nn.init.zeros_(self.projection.bias)
-                emb = self.projection(features)  # Recompute
-                if torch.isnan(emb).any() or torch.isinf(emb).any():
-                    print(f"DEBUG: Still NaN after reinit, using nan_to_num")
-                    emb = torch.nan_to_num(emb, nan=0.0, posinf=10.0, neginf=-10.0)
-            else:
-                # Features might have NaN
-                if torch.isnan(features).any() or torch.isinf(features).any():
-                    print(f"DEBUG: Features have NaN/Inf! Cleaning...")
-                    features = torch.nan_to_num(features, nan=0.0, posinf=100.0, neginf=-100.0)
-                    emb = self.projection(features)
-                emb = torch.nan_to_num(emb, nan=0.0, posinf=10.0, neginf=-10.0)
-
-        # Scale and bound output to [-10, 10] range
-        # ResNet features are typically well-scaled, so this should work well
-        emb = torch.tanh(emb) * 10.0  # Bound to [-10, 10]
-
-        # Final check
-        if torch.isnan(emb).any() or torch.isinf(emb).any():
-            print(f"DEBUG: NaN/Inf in final emb!")
-            emb = torch.nan_to_num(emb, nan=0.0, posinf=10.0, neginf=-10.0)
-
-        emb = emb.unsqueeze(1)  # (B, 1, emb_dim)
-
-        return emb
+        return features

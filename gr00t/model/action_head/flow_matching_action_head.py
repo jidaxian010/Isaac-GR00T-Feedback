@@ -415,17 +415,15 @@ class FlowmatchingActionHead(nn.Module):
                 timestep=timesteps_tensor,
             )
             if t == num_steps - 1:
-                print(f"last step: {t}")
+                # print(f"last step: {t}")
 
                 final_model_output_action = model_output[:, -self.action_horizon :]
                 final_raw_action = actions
             else:
                 pred = self.action_decoder(model_output, embodiment_id)
                 pred_velocity = pred[:, -self.action_horizon :]
-                print(f"t: {t}")
-                print(
-                    f"pred_velocity: {pred_velocity.shape}, range {pred_velocity.min().item()}, {pred_velocity.max().item()}"
-                )
+                # print(f"step: {t}")
+
                 actions = actions + dt * pred_velocity
 
         return BatchFeature(

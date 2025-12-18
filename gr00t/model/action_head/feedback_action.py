@@ -3,55 +3,322 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers.feature_extraction_utils import BatchFeature
 from gr00t.model.action_head.obs_encoder import ObsEncoder
-from gr00t.model.action_head.flow_matching_action_head import CategorySpecificMLP
-from gr00t.model.action_head.flow_matching_action_head import CategorySpecificLinear
 
 
-class ObserverMLP(nn.Module):
+class FeedbackDecoder(nn.Module):
     """
-    mlp(obs_encoder(obs), x)
-    Combines observation features with model output action features.
+    Transformer-based feedback decoder with DINOv2 visual encoder.
+
+    Architecture:
+      1. DINOv2 encoder: obs [B,T,V,H,W,C] -> feature map [B, 768, 7, 7]
+      2. Flatten to spatial tokens: [B, 49, 768]
+      3. Project latent_action and obs_tokens to d_model
+      4. TransformerDecoderLayer: cross-attention between action and visual tokens
+      5. Output head: predict velocity [B, action_horizon, action_dim]
     """
 
-    def __init__(self, num_categories, input_dim, hidden_dim, output_dim):
+    def __init__(self, num_categories, input_dim, hidden_dim, output_dim, d_model=256, nhead=4, dim_ff=512):
+        """
+        Args:
+            num_categories: Number of embodiment categories (not used)
+            input_dim: Latent action dimension (e.g., 1024)
+            hidden_dim: Not used (kept for compatibility)
+            output_dim: Action dimension (e.g., 7 for 7-DOF robot)
+            d_model: Transformer hidden dimension (default 256)
+            nhead: Number of attention heads (default 4)
+            dim_ff: Feedforward dimension (default 512)
+        """
         super().__init__()
         self.num_categories = num_categories
-        # Two layer MLP: map from concatenated features to output through hidden layer
-        self.layer = CategorySpecificMLP(num_categories, 2 * input_dim, hidden_dim, output_dim)
-        self.obs_encoder = ObsEncoder(emb_dim=input_dim)
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        self.d_model = d_model
+
+        # DINOv2 encoder: outputs [B, 768, 7, 7]
+        self.obs_encoder = ObsEncoder(model_name="facebook/dinov2-base", freeze=True)
+        C_obs = 768  # DINOv2-base output channels
+
+        # Simple projection layers with Xavier initialization
+        self.act_proj = nn.Linear(input_dim, d_model)
+        self.obs_proj = nn.Linear(C_obs, d_model)
+        self.vel_head = nn.Linear(d_model, output_dim)
+
+        # Initialize with Xavier/Glorot uniform
+        nn.init.xavier_uniform_(self.act_proj.weight)
+        nn.init.zeros_(self.act_proj.bias)
+        nn.init.xavier_uniform_(self.obs_proj.weight)
+        nn.init.zeros_(self.obs_proj.bias)
+        nn.init.xavier_uniform_(self.vel_head.weight)
+        nn.init.zeros_(self.vel_head.bias)
+
+        # Transformer decoder layer (self-attn + cross-attn + FFN)
+        self.dec_layer = nn.TransformerDecoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=dim_ff,
+            batch_first=True,  # Shapes are [B, T, D]
+            dropout=0.0,
+            activation="gelu",
+            norm_first=True,  # Pre-norm for stability
+        )
+
+        # Track first forward pass to check weights after checkpoint loads
+        self._first_forward_done = False
 
     def forward(self, model_output_action, obs, cat_ids):
         """
         Args:
-            x: model_output_action of shape (B, action_horizon, hidden_size)
-            obs: observation image of shape (B, T, V, H, W, C) or similar
-            cat_ids: embodiment_id of shape (B,)
+            model_output_action: [B, action_horizon, input_dim] - latent action sequence
+            obs: [B, T, V, H, W, C] - observation images
+            cat_ids: [B,] - embodiment IDs (not used)
         Returns:
-            output of shape (B, action_horizon, action_dim)
+            output: [B, action_horizon, action_dim] - predicted velocity
         """
-        # Encode observation: (B, 1, hidden_size)
-        print(f"obs: {obs.shape}, range {obs.min().item()}, {obs.max().item()}")
-        obs_feature = self.obs_encoder(obs)  # (B, 1, hidden_size)
+        # Check weights on first forward pass (checkpoint may have corrupted them)
+        if not self._first_forward_done:
+            self._first_forward_done = True
 
-        # Expand obs_feature to match x's sequence length: (B, action_horizon, hidden_size)
-        B, action_horizon, hidden_size = model_output_action.shape
-        obs_feature = obs_feature.expand(B, action_horizon, hidden_size)
+            # Check if weights have NaN/Inf (corrupted by checkpoint loading)
+            weights_corrupted = (
+                torch.isnan(self.act_proj.weight).any()
+                or torch.isinf(self.act_proj.weight).any()
+                or torch.isnan(self.obs_proj.weight).any()
+                or torch.isinf(self.obs_proj.weight).any()
+                or torch.isnan(self.vel_head.weight).any()
+                or torch.isinf(self.vel_head.weight).any()
+            )
 
-        # Combine obs_feature with model_output_action (concatenate them)
-        combined = torch.cat([obs_feature, model_output_action], dim=-1)  # (B, action_horizon, 2*hidden_size)
+            # Also check transformer decoder layer
+            decoder_corrupted = False
+            for param in self.dec_layer.parameters():
+                if torch.isnan(param).any() or torch.isinf(param).any():
+                    decoder_corrupted = True
+                    break
 
-        # Two layer MLP: map to output through hidden layer
-        output = self.layer(combined, cat_ids)  # (B, action_horizon, action_dim)
+            if weights_corrupted or decoder_corrupted:
+                print("⚠ WARNING: FeedbackDecoder weights corrupted by checkpoint!")
+                print("  Reinitializing with fresh Xavier weights...")
 
-        # Bound output to [-5, 5] range using tanh (smooth, differentiable)
-        # This preserves gradient flow unlike hard clamping
-        output = torch.tanh(output) * 5.0
+                device = self.act_proj.weight.device
+                dtype = self.act_proj.weight.dtype
 
-        print(f"obs_feature: {obs_feature.shape}, range {obs_feature.min().item()}, {obs_feature.max().item()}")
+                # Reinitialize with fresh tensors
+                with torch.no_grad():
+                    # act_proj
+                    fan_in, fan_out = self.act_proj.weight.shape[1], self.act_proj.weight.shape[0]
+                    std = (2.0 / (fan_in + fan_out)) ** 0.5
+                    self.act_proj.weight.copy_(torch.randn(fan_out, fan_in, device=device, dtype=dtype) * std)
+                    self.act_proj.bias.zero_()
+
+                    # obs_proj
+                    fan_in, fan_out = self.obs_proj.weight.shape[1], self.obs_proj.weight.shape[0]
+                    std = (2.0 / (fan_in + fan_out)) ** 0.5
+                    self.obs_proj.weight.copy_(torch.randn(fan_out, fan_in, device=device, dtype=dtype) * std)
+                    self.obs_proj.bias.zero_()
+
+                    # vel_head
+                    fan_in, fan_out = self.vel_head.weight.shape[1], self.vel_head.weight.shape[0]
+                    std = (2.0 / (fan_in + fan_out)) ** 0.5
+                    self.vel_head.weight.copy_(torch.randn(fan_out, fan_in, device=device, dtype=dtype) * std)
+                    self.vel_head.bias.zero_()
+
+                    # Reinitialize transformer decoder layer if corrupted
+                    if decoder_corrupted:
+                        print("  ⚠ Transformer decoder also corrupted - reinitializing...")
+                        for name, param in self.dec_layer.named_parameters():
+                            if "weight" in name and param.ndim >= 2:
+                                # Xavier for weight matrices
+                                if param.ndim == 2:
+                                    fan_in_dec, fan_out_dec = param.shape[1], param.shape[0]
+                                    std_dec = (2.0 / (fan_in_dec + fan_out_dec)) ** 0.5
+                                    param.copy_(torch.randn_like(param) * std_dec)
+                            elif "bias" in name:
+                                param.zero_()
+
+                        # Verify reinitialization worked
+                        still_bad = False
+                        for name, param in self.dec_layer.named_parameters():
+                            if torch.isnan(param).any() or torch.isinf(param).any():
+                                print(f"  ✗ WARNING: {name} still has NaN/Inf after reinit!")
+                                still_bad = True
+
+                        if still_bad:
+                            print("  ⚠ Recreating transformer decoder from scratch...")
+                            self.dec_layer = nn.TransformerDecoderLayer(
+                                d_model=self.d_model,
+                                nhead=4,
+                                dim_feedforward=512,
+                                batch_first=True,
+                                dropout=0.0,
+                                activation="gelu",
+                                norm_first=True,
+                            ).to(device=device, dtype=dtype)
+
+                print(f"✓ All FeedbackDecoder layers reinitialized on {device}")
+
+        # 1) Extract last timestep, last view and prepare for DINOv2
+        # obs: [B, T, V, H, W, C] -> extract last frame: [B, 224, 224, 3]
+        x = obs[:, -1, -1]  # [B, 224, 224, 3]
+
+        # Convert to [B, 3, 224, 224] for DINOv2
+        if x.shape[-1] == 3:
+            x = x.permute(0, 3, 1, 2).contiguous()  # [B, 3, 224, 224]
+
+        # DINOv2 encoder -> feature map [B, 768, 7, 7]
+        feat = self.obs_encoder(x)  # [B, 768, 7, 7]
+
+        B, C_obs, H, W = feat.shape
+        N = H * W  # Number of spatial tokens (49 for 7x7)
+
+        # 2) Flatten to spatial tokens [B, N, C_obs]
+        obs_tokens_raw = feat.flatten(2).transpose(1, 2)  # [B, 49, 768]
+
+        # 3) Project to d_model with simple Linear layers
+        memory = self.obs_proj(obs_tokens_raw)  # [B, 49, d_model]
+        tgt = self.act_proj(model_output_action)  # [B, 16, d_model]
+
+        # Runtime check for NaN/extreme values (indicates bad weights)
+        memory_bad = torch.isnan(memory).any() or torch.isinf(memory).any() or memory.abs().max() > 1e10
+        tgt_bad = torch.isnan(tgt).any() or torch.isinf(tgt).any() or tgt.abs().max() > 1e10
+
+        if memory_bad or tgt_bad:
+            print("\n⚠ CRITICAL: Projection outputs have extreme/NaN values!")
+            print(f"  obs_tokens range: [{obs_tokens_raw.min().item():.2f}, {obs_tokens_raw.max().item():.2f}]")
+            print(
+                f"  model_output_action range: [{model_output_action.min().item():.2f}, {model_output_action.max().item():.2f}]"
+            )
+            print(f"  memory range: [{memory.min().item():.2e}, {memory.max().item():.2e}]")
+            print(f"  tgt range: [{tgt.min().item():.2e}, {tgt.max().item():.2e}]")
+            print(
+                f"  obs_proj weight range: [{self.obs_proj.weight.min().item():.2e}, {self.obs_proj.weight.max().item():.2e}]"
+            )
+            print(
+                f"  act_proj weight range: [{self.act_proj.weight.min().item():.2e}, {self.act_proj.weight.max().item():.2e}]"
+            )
+
+            print("\n  Attempting emergency reinitialization with fresh tensors...")
+            device = self.obs_proj.weight.device
+            dtype = self.obs_proj.weight.dtype
+
+            # Create completely fresh tensors using torch.randn
+            with torch.no_grad():
+                # obs_proj
+                fan_in, fan_out = self.obs_proj.weight.shape[1], self.obs_proj.weight.shape[0]
+                std = (2.0 / (fan_in + fan_out)) ** 0.5
+                self.obs_proj.weight.copy_(torch.randn(fan_out, fan_in, device=device, dtype=dtype) * std)
+                self.obs_proj.bias.zero_()
+
+                # act_proj
+                fan_in, fan_out = self.act_proj.weight.shape[1], self.act_proj.weight.shape[0]
+                std = (2.0 / (fan_in + fan_out)) ** 0.5
+                self.act_proj.weight.copy_(torch.randn(fan_out, fan_in, device=device, dtype=dtype) * std)
+                self.act_proj.bias.zero_()
+
+            print(f"  Weights reinitialized on {device}, dtype={dtype}")
+            print(
+                f"  New obs_proj weight range: [{self.obs_proj.weight.min().item():.3f}, {self.obs_proj.weight.max().item():.3f}]"
+            )
+            print(
+                f"  New act_proj weight range: [{self.act_proj.weight.min().item():.3f}, {self.act_proj.weight.max().item():.3f}]"
+            )
+
+            # Retry
+            memory = self.obs_proj(obs_tokens_raw)
+            tgt = self.act_proj(model_output_action)
+            print(f"  After reinit - memory range: [{memory.min().item():.2e}, {memory.max().item():.2e}]")
+            print(f"  After reinit - tgt range: [{tgt.min().item():.2e}, {tgt.max().item():.2e}]")
+
+            # Final check
+            memory_bad = torch.isnan(memory).any() or torch.isinf(memory).any() or memory.abs().max() > 1e10
+            tgt_bad = torch.isnan(tgt).any() or torch.isinf(tgt).any() or tgt.abs().max() > 1e10
+            if memory_bad or tgt_bad:
+                raise RuntimeError(
+                    "Projection layers still bad after reinitialization!\n"
+                    "The checkpoint is incompatible with this architecture."
+                )
+
+        # 4) Transformer decoder: (self-attn on tgt) + (cross-attn tgt<-memory) + FFN
+        tgt2 = self.dec_layer(tgt, memory)  # [B, 16, d_model]
+
+        # Check if transformer decoder produced NaN
+        if torch.isnan(tgt2).any() or torch.isinf(tgt2).any():
+            print("\n⚠ CRITICAL: Transformer decoder produced NaN!")
+            print(f"  Input tgt range: [{tgt.min().item():.2f}, {tgt.max().item():.2f}]")
+            print(f"  Input memory range: [{memory.min().item():.2f}, {memory.max().item():.2f}]")
+            print(f"  Output tgt2 has NaN: {torch.isnan(tgt2).any()}")
+            print(f"  Output tgt2 has Inf: {torch.isinf(tgt2).any()}")
+
+            # Check decoder layer weights in detail
+            print("\n  Checking decoder layer weights:")
+            weights_bad = False
+            for name, param in self.dec_layer.named_parameters():
+                has_nan = torch.isnan(param).any().item()
+                has_inf = torch.isinf(param).any().item()
+                if has_nan or has_inf:
+                    print(f"    ✗ {name}: NaN={has_nan}, Inf={has_inf}")
+                    weights_bad = True
+                else:
+                    pmin, pmax = param.min().item(), param.max().item()
+                    print(f"    ✓ {name}: range=[{pmin:.3f}, {pmax:.3f}]")
+
+            if not weights_bad:
+                print("  ⚠ Weights look OK but output is NaN - possible numerical instability!")
+                print("  Attempting to recreate transformer decoder with better stability...")
+
+                device = tgt.device
+                dtype = tgt.dtype
+
+                # Recreate with layer norm epsilon for stability
+                self.dec_layer = nn.TransformerDecoderLayer(
+                    d_model=self.d_model,
+                    nhead=4,
+                    dim_feedforward=512,
+                    batch_first=True,
+                    dropout=0.0,
+                    activation="gelu",
+                    norm_first=True,
+                    layer_norm_eps=1e-5,  # Default, but explicit
+                ).to(device=device, dtype=dtype)
+
+                print("  Retrying forward pass with fresh decoder...")
+                tgt2 = self.dec_layer(tgt, memory)
+
+                if torch.isnan(tgt2).any() or torch.isinf(tgt2).any():
+                    print("  ✗ Still NaN after recreation!")
+                    raise RuntimeError(
+                        "TransformerDecoderLayer producing NaN even after recreation!\n"
+                        "This suggests a fundamental incompatibility.\n"
+                        "Try training from scratch WITHOUT loading any checkpoint."
+                    )
+                else:
+                    print(f"  ✓ SUCCESS! New tgt2 range: [{tgt2.min().item():.2f}, {tgt2.max().item():.2f}]")
+            else:
+                raise RuntimeError(
+                    "TransformerDecoderLayer weights still corrupted!\n"
+                    "The checkpoint loading is overriding our reinitialization.\n"
+                    "Solution: Train from scratch WITHOUT loading checkpoint."
+                )
+
+        # 5) Output velocity per action token
+        pred_vel = self.vel_head(tgt2)  # [B, 16, action_dim]
+
+        # Bound to [-5, 5] using tanh
+        output = torch.tanh(pred_vel) * 5.0
+
+        # Debug prints
+        print(f"obs: {obs.shape}, range [{obs.min().item()}, {obs.max().item()}]")
+        print(f"x (prepared): {x.shape}")
+        print(f"feat (DINOv2): {feat.shape}, range [{feat.min().item():.2f}, {feat.max().item():.2f}]")
+        print(f"obs_tokens: {obs_tokens_raw.shape}, spatial_tokens={N}")
         print(
-            f"model_output_action: {model_output_action.shape}, range {model_output_action.min().item()}, {model_output_action.max().item()}"
+            f"model_output_action: {model_output_action.shape}, range [{model_output_action.min().item():.2f}, {model_output_action.max().item():.2f}]"
         )
-        print(f"feedback output range: {output.shape}, range {output.min().item()}, {output.max().item()}")
+        print(f"memory: {memory.shape}, range [{memory.min().item():.2f}, {memory.max().item():.2f}]")
+        print(f"tgt: {tgt.shape}, range [{tgt.min().item():.2f}, {tgt.max().item():.2f}]")
+        print(f"tgt2: {tgt2.shape}, range [{tgt2.min().item():.2f}, {tgt2.max().item():.2f}]")
+        print(f"pred_vel: {pred_vel.shape}, range [{pred_vel.min().item():.2f}, {pred_vel.max().item():.2f}]")
+        print(f"output: {output.shape}, range [{output.min().item():.2f}, {output.max().item():.2f}]")
+
         return output
 
 
@@ -62,7 +329,7 @@ class FeedbackAction(nn.Module):
         self.action_horizon = config.action_horizon
         self.hidden_size = config.hidden_size
 
-        self.action_decoder_observe = ObserverMLP(
+        self.action_decoder_observe = FeedbackDecoder(
             num_categories=config.max_num_embodiments,
             input_dim=self.hidden_size,
             hidden_dim=self.hidden_size,
@@ -134,8 +401,7 @@ class FeedbackAction(nn.Module):
                 final_model_output_action, action_input.simple_img, action_input.embodiment_id
             )
             pred_actions = final_raw_action + dt * pred_velocity
-            pred_actions_normalized = torch.tanh(pred_actions)  # normalize to match gt_actions
-            return BatchFeature(data={"action_pred": pred_actions_normalized})
+            return BatchFeature(data={"action_pred": pred_actions})
         except (AttributeError, KeyError):
             # Fallback: use action_pred directly if final step info not available
             pred_actions = action_head_output.action_pred  # [B, 16, action_dim]
