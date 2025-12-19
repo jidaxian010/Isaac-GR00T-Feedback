@@ -285,6 +285,7 @@ def main(config: ArgsConfig):
         weight_decay=config.weight_decay,
         warmup_ratio=config.warmup_ratio,
         lr_scheduler_type="cosine",
+        max_grad_norm=1.0,  # Clip gradients to prevent explosion (critical for transformer stability)
         logging_steps=1.0,
         num_train_epochs=300,
         max_steps=config.max_steps,

@@ -9,15 +9,38 @@ class FeedbackDecoder(nn.Module):
     """
     Transformer-based feedback decoder with DINOv2 visual encoder.
 
+    Design Philosophy:
+    - model_output_action is PRIMARY signal (action features dominate)
+    - Visual features provide CONTEXT/REFINEMENT (small contribution via learnable gate)
+    - Transformer allows action tokens to selectively attend to relevant visual regions
+    - Strong residual connection ensures action features remain dominant
+
     Architecture:
       1. DINOv2 encoder: obs [B,T,V,H,W,C] -> feature map [B, 768, 7, 7]
       2. Flatten to spatial tokens: [B, 49, 768]
       3. Project latent_action and obs_tokens to d_model
-      4. TransformerDecoderLayer: cross-attention between action and visual tokens
-      5. Output head: predict velocity [B, action_horizon, action_dim]
+      4. TransformerDecoderLayer: cross-attention (action queries attend to visual keys/values)
+      5. Residual: tgt_final = tgt + visual_gate * (tgt2 - tgt)  [95% action, 5% visual]
+      6. Output head: predict velocity [B, action_horizon, action_dim]
+
+    Why Transformer over MLP?
+    - Spatial awareness: Can attend to relevant image regions per action token
+    - Flexible: Different action tokens can focus on different visual areas
+    - Capacity: Better at learning complex action-visual relationships
+    - Already have MLP baseline, transformer adds complementary capabilities
     """
 
-    def __init__(self, num_categories, input_dim, hidden_dim, output_dim, d_model=256, nhead=4, dim_ff=512):
+    def __init__(
+        self,
+        num_categories,
+        input_dim,
+        hidden_dim,
+        output_dim,
+        d_model=256,
+        nhead=4,
+        dim_ff=512,
+        visual_gate_initial=0.30,
+    ):
         """
         Args:
             num_categories: Number of embodiment categories (not used)
@@ -27,12 +50,14 @@ class FeedbackDecoder(nn.Module):
             d_model: Transformer hidden dimension (default 256)
             nhead: Number of attention heads (default 4)
             dim_ff: Feedforward dimension (default 512)
+            visual_gate_initial: Initial value for visual gate (default 0.30 = 30% visual influence)
         """
         super().__init__()
         self.num_categories = num_categories
         self.input_dim = input_dim
         self.output_dim = output_dim
         self.d_model = d_model
+        self.gate_initial = visual_gate_initial  # Store initial value for reinitialization
 
         # DINOv2 encoder: outputs [B, 768, 7, 7]
         self.obs_encoder = ObsEncoder(model_name="facebook/dinov2-base", freeze=True)
@@ -62,6 +87,12 @@ class FeedbackDecoder(nn.Module):
             norm_first=True,  # Pre-norm for stability
         )
 
+        # Learnable gate to control visual feature influence
+        # This ensures model_output_action is PRIMARY, visual features provide refinement
+        # Initial value is configurable via visual_gate_initial parameter
+        # Lower value = more action-focused, less visual-dependent
+        self.visual_gate = nn.Parameter(torch.tensor(self.gate_initial))
+
         # Track first forward pass to check weights after checkpoint loads
         self._first_forward_done = False
 
@@ -88,6 +119,15 @@ class FeedbackDecoder(nn.Module):
                 or torch.isinf(self.vel_head.weight).any()
             )
 
+            # Check visual_gate: should be ~gate_initial, if it's 0 or corrupted, reinitialize
+            gate_val = self.visual_gate.item()
+            gate_corrupted = (
+                torch.isnan(self.visual_gate).any()
+                or torch.isinf(self.visual_gate).any()
+                or abs(gate_val) < 1e-6  # Effectively 0 (checkpoint might have set it to 0)
+                or abs(gate_val - self.gate_initial) > 0.1  # Way off from expected value
+            )
+
             # Also check transformer decoder layer
             decoder_corrupted = False
             for param in self.dec_layer.parameters():
@@ -95,8 +135,12 @@ class FeedbackDecoder(nn.Module):
                     decoder_corrupted = True
                     break
 
-            if weights_corrupted or decoder_corrupted:
+            if weights_corrupted or decoder_corrupted or gate_corrupted:
                 print("⚠ WARNING: FeedbackDecoder weights corrupted by checkpoint!")
+                if gate_corrupted:
+                    print(
+                        f"  visual_gate is corrupted/reset: {self.visual_gate.item():.6f} (expected ~{self.gate_initial})"
+                    )
                 print("  Reinitializing with fresh Xavier weights...")
 
                 device = self.act_proj.weight.device
@@ -121,6 +165,13 @@ class FeedbackDecoder(nn.Module):
                     std = (2.0 / (fan_in + fan_out)) ** 0.5
                     self.vel_head.weight.copy_(torch.randn(fan_out, fan_in, device=device, dtype=dtype) * std)
                     self.vel_head.bias.zero_()
+
+                    # Reinitialize visual_gate to gate_initial if corrupted
+                    if gate_corrupted:
+                        print(
+                            f"  Reinitializing visual_gate from {self.visual_gate.item():.6f} to {self.gate_initial}"
+                        )
+                        self.visual_gate.copy_(torch.tensor(self.gate_initial, device=device, dtype=dtype))
 
                     # Reinitialize transformer decoder layer if corrupted
                     if decoder_corrupted:
@@ -155,6 +206,19 @@ class FeedbackDecoder(nn.Module):
                             ).to(device=device, dtype=dtype)
 
                 print(f"✓ All FeedbackDecoder layers reinitialized on {device}")
+
+            # Always check and fix visual_gate if needed (even if other weights are fine)
+            if gate_corrupted and not (weights_corrupted or decoder_corrupted):
+                # Gate is corrupted but other weights are fine - just fix the gate
+                device = self.visual_gate.device
+                dtype = self.visual_gate.dtype
+                with torch.no_grad():
+                    print(f"  Fixing visual_gate: {self.visual_gate.item():.6f} -> {self.gate_initial}")
+                    self.visual_gate.copy_(torch.tensor(self.gate_initial, device=device, dtype=dtype))
+
+            # Always print visual_gate value on first forward pass for debugging
+            gate_val = self.visual_gate.item()
+            print(f"✓ visual_gate initialized: {gate_val:.6f} (visual influence: {gate_val * 100:.2f}%)")
 
         # 1) Extract last timestep, last view and prepare for DINOv2
         # obs: [B, T, V, H, W, C] -> extract last frame: [B, 224, 224, 3]
@@ -238,7 +302,27 @@ class FeedbackDecoder(nn.Module):
                 )
 
         # 4) Transformer decoder: (self-attn on tgt) + (cross-attn tgt<-memory) + FFN
+        # This allows action tokens to attend to visual tokens, but we'll heavily weight
+        # the original action features to ensure they remain primary
         tgt2 = self.dec_layer(tgt, memory)  # [B, 16, d_model]
+
+        # 4.25) Stabilize transformer output to prevent gradient explosion
+        # Clip extreme values and scale to match input magnitude
+        tgt2_max = tgt2.abs().max().item()
+        if tgt2_max > 5.0:
+            # Scale down if too large (prevents gradient explosion)
+            scale_factor = 5.0 / tgt2_max
+            tgt2 = tgt2 * scale_factor
+            if not hasattr(self, "_warned_large_output"):
+                print(f"⚠ WARNING: Large transformer output (max={tgt2_max:.2f}), scaling by {scale_factor:.3f}")
+                self._warned_large_output = True
+
+        # 4.5) Strong residual connection: action features are PRIMARY, visual features are refinement
+        # Formula: tgt_final = tgt + visual_gate * (tgt2 - tgt)
+        # visual_gate controls the balance: (1-gate)% action features, gate% visual refinement
+        # This ensures model_output_action dominates, visual features provide refinement
+        # The transformer learns HOW to refine, but action features are the base
+        tgt_final = tgt + self.visual_gate * (tgt2 - tgt)  # [B, 16, d_model]
 
         # Check if transformer decoder produced NaN
         if torch.isnan(tgt2).any() or torch.isinf(tgt2).any():
@@ -247,6 +331,7 @@ class FeedbackDecoder(nn.Module):
             print(f"  Input memory range: [{memory.min().item():.2f}, {memory.max().item():.2f}]")
             print(f"  Output tgt2 has NaN: {torch.isnan(tgt2).any()}")
             print(f"  Output tgt2 has Inf: {torch.isinf(tgt2).any()}")
+            print(f"  Visual gate value: {self.visual_gate.item():.3f}")
 
             # Check decoder layer weights in detail
             print("\n  Checking decoder layer weights:")
@@ -282,6 +367,7 @@ class FeedbackDecoder(nn.Module):
 
                 print("  Retrying forward pass with fresh decoder...")
                 tgt2 = self.dec_layer(tgt, memory)
+                tgt_final = tgt + self.visual_gate * (tgt2 - tgt)
 
                 if torch.isnan(tgt2).any() or torch.isinf(tgt2).any():
                     print("  ✗ Still NaN after recreation!")
@@ -292,6 +378,7 @@ class FeedbackDecoder(nn.Module):
                     )
                 else:
                     print(f"  ✓ SUCCESS! New tgt2 range: [{tgt2.min().item():.2f}, {tgt2.max().item():.2f}]")
+                    print(f"  tgt_final range: [{tgt_final.min().item():.2f}, {tgt_final.max().item():.2f}]")
             else:
                 raise RuntimeError(
                     "TransformerDecoderLayer weights still corrupted!\n"
@@ -300,10 +387,7 @@ class FeedbackDecoder(nn.Module):
                 )
 
         # 5) Output velocity per action token
-        pred_vel = self.vel_head(tgt2)  # [B, 16, action_dim]
-
-        # Bound to [-5, 5] using tanh
-        output = torch.tanh(pred_vel) * 5.0
+        pred_vel = self.vel_head(tgt_final)  # [B, 16, action_dim]
 
         # Debug prints
         print(f"obs: {obs.shape}, range [{obs.min().item()}, {obs.max().item()}]")
@@ -314,12 +398,17 @@ class FeedbackDecoder(nn.Module):
             f"model_output_action: {model_output_action.shape}, range [{model_output_action.min().item():.2f}, {model_output_action.max().item():.2f}]"
         )
         print(f"memory: {memory.shape}, range [{memory.min().item():.2f}, {memory.max().item():.2f}]")
-        print(f"tgt: {tgt.shape}, range [{tgt.min().item():.2f}, {tgt.max().item():.2f}]")
-        print(f"tgt2: {tgt2.shape}, range [{tgt2.min().item():.2f}, {tgt2.max().item():.2f}]")
+        print(f"tgt (action features): {tgt.shape}, range [{tgt.min().item():.2f}, {tgt.max().item():.2f}]")
+        print(f"tgt2 (transformer output): {tgt2.shape}, range [{tgt2.min().item():.2f}, {tgt2.max().item():.2f}]")
+        print(
+            f"visual_gate: {self.visual_gate.item():.3f} (visual influence: {self.visual_gate.item() * 100:.1f}%)"
+        )
+        print(
+            f"tgt_final (tgt + gate*(tgt2-tgt)): {tgt_final.shape}, range [{tgt_final.min().item():.2f}, {tgt_final.max().item():.2f}]"
+        )
         print(f"pred_vel: {pred_vel.shape}, range [{pred_vel.min().item():.2f}, {pred_vel.max().item():.2f}]")
-        print(f"output: {output.shape}, range [{output.min().item():.2f}, {output.max().item():.2f}]")
 
-        return output
+        return pred_vel
 
 
 class FeedbackAction(nn.Module):

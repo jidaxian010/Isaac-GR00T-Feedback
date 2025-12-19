@@ -415,14 +415,14 @@ class FlowmatchingActionHead(nn.Module):
                 timestep=timesteps_tensor,
             )
             if t == num_steps - 1:
-                # print(f"last step: {t}")
+                # print(f"LAST STEP: {t}")
 
                 final_model_output_action = model_output[:, -self.action_horizon :]
                 final_raw_action = actions
             else:
                 pred = self.action_decoder(model_output, embodiment_id)
                 pred_velocity = pred[:, -self.action_horizon :]
-                # print(f"step: {t}")
+                # print(f"STEP: {t}")
 
                 actions = actions + dt * pred_velocity
 
