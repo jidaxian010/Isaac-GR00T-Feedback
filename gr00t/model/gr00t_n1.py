@@ -328,17 +328,44 @@ class GR00T_N1_5(PreTrainedModel):
     #         # self.validate_data(feedback_action_outputs, self._cached_backbone_outputs, is_training=False)
     #         return feedback_action_outputs
 
-    def get_action(  # 4. Update Latent Velocity
+    # def get_action(  # 4. Update Latent Velocity
+    #     self,
+    #     inputs: dict,
+    #     time_step: int,
+    # ) -> BatchFeature:
+    #     backbone_inputs, action_inputs = self.prepare_input(inputs)
+    #     backbone_outputs = self.backbone(backbone_inputs)
+    #     action_head_outputs = self.action_head.get_action(backbone_outputs, action_inputs)
+    #     feedback_action_outputs = self.feedback_action.get_action(action_head_outputs, time_step, action_inputs)
+    #     self.validate_data(action_head_outputs, backbone_outputs, is_training=False)
+    #     return feedback_action_outputs
+
+    def get_action(
         self,
-        inputs: dict,
+        inputs: dict, 
         time_step: int,
     ) -> BatchFeature:
         backbone_inputs, action_inputs = self.prepare_input(inputs)
-        backbone_outputs = self.backbone(backbone_inputs)
-        action_head_outputs = self.action_head.get_action(backbone_outputs, action_inputs)
-        feedback_action_outputs = self.feedback_action.get_action(action_head_outputs, time_step, action_inputs)
-        self.validate_data(action_head_outputs, backbone_outputs, is_training=False)
-        return feedback_action_outputs
+        if time_step % 4 == 0:
+            print(f"im at {time_step}, Run Model")
+            print("320 320 320")
+            # Fresh run: backbone + action_head + feedback
+            backbone_outputs = self.backbone(backbone_inputs)
+            action_head_outputs = self.action_head.get_action(backbone_outputs, action_inputs)
+            self._cached_action_head_outputs = action_head_outputs
+            feedback_action_outputs = self.feedback_action.get_action(action_head_outputs, time_step, action_inputs)
+            return feedback_action_outputs
+        else:
+            print(f"im at {time_step}, CACHED VLM")
+            # Reuse cached action_head outputs, only run feedback with fresh observations
+            if not hasattr(self, "_cached_action_head_outputs"):
+                raise ValueError(f"No cached action head outputs available at timestep {time_step}")
+            # Skip action_head.get_action() - just use cached outputs directly with feedback
+            feedback_action_outputs = self.feedback_action.get_action(
+                self._cached_action_head_outputs, time_step, action_inputs
+            )
+            return feedback_action_outputs
+
 
     def prepare_input(self, inputs) -> Tuple[BatchFeature, BatchFeature]:
         self.validate_inputs(inputs)

@@ -125,7 +125,7 @@ class FeedbackDecoder(nn.Module):
                 torch.isnan(self.visual_gate).any()
                 or torch.isinf(self.visual_gate).any()
                 or abs(gate_val) < 1e-6  # Effectively 0 (checkpoint might have set it to 0)
-                or abs(gate_val - self.gate_initial) > 0.1  # Way off from expected value
+                # or abs(gate_val - self.gate_initial) > 0.1  # Way off from expected value
             )
 
             # Also check transformer decoder layer
@@ -480,18 +480,18 @@ class FeedbackAction(nn.Module):
         at the final step similar to training.
         """
         # Check if we have the final step information (from flow_matching_action_head)
-        try:
-            final_model_output_action = action_head_output.final_model
-            final_raw_action = action_head_output.final_raw_action
-            dt = action_head_output.dt
 
-            # Apply action_decoder_observe similar to training forward
-            pred_velocity = self.action_decoder_observe(
-                final_model_output_action, action_input.simple_img, action_input.embodiment_id
-            )
-            pred_actions = final_raw_action + dt * pred_velocity
-            return BatchFeature(data={"action_pred": pred_actions})
-        except (AttributeError, KeyError):
-            # Fallback: use action_pred directly if final step info not available
-            pred_actions = action_head_output.action_pred  # [B, 16, action_dim]
-            return BatchFeature(data={"action_pred": pred_actions})
+        print(f"@ feedback_action time_step: {time_step}")
+        window_idx = time_step % 4
+
+        final_model_output_action = action_head_output.final_model
+        final_raw_action = action_head_output.final_raw_action
+        dt = action_head_output.dt
+    
+        # Apply action_decoder_observe similar to training forward
+        pred_velocity = self.action_decoder_observe(
+            final_model_output_action, action_input.simple_img, action_input.embodiment_id
+        )
+        pred_actions = final_raw_action + dt * pred_velocity
+        pred_actions_window = pred_actions[:, window_idx * 4 : (window_idx + 1) * 4, :]
+        return BatchFeature(data={"action_pred": pred_actions_window})
