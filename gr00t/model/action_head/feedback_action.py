@@ -96,12 +96,13 @@ class FeedbackDecoder(nn.Module):
         # Track first forward pass to check weights after checkpoint loads
         self._first_forward_done = False
 
-    def forward(self, model_output_action, obs, cat_ids):
+    def forward(self, model_output_action, obs, cat_ids, verbose=False):
         """
         Args:
             model_output_action: [B, action_horizon, input_dim] - latent action sequence
-            obs: [B, T, V, H, W, C] - observation images
+            obs: [B, V, T, H, W, C] - observation images (V=views, T=timesteps)
             cat_ids: [B,] - embodiment IDs (not used)
+            verbose: bool - whether to print debug info (default False)
         Returns:
             output: [B, action_horizon, action_dim] - predicted velocity
         """
@@ -220,9 +221,9 @@ class FeedbackDecoder(nn.Module):
             gate_val = self.visual_gate.item()
             print(f"✓ visual_gate initialized: {gate_val:.6f} (visual influence: {gate_val * 100:.2f}%)")
 
-        # 1) Extract last timestep, last view and prepare for DINOv2
-        # obs: [B, T, V, H, W, C] -> extract last frame: [B, 224, 224, 3]
-        x = obs[:, -1, -1]  # [B, 224, 224, 3]
+        # 1) Extract last view, last timestep and prepare for DINOv2
+        # obs: [B, V, T, H, W, C] -> extract last frame: [B, H, W, C]
+        x = obs[:, -1, -1]  # [B, V=-1, T=-1] -> [B, H, W, C]
 
         # Convert to [B, 3, 224, 224] for DINOv2
         if x.shape[-1] == 3:
@@ -389,24 +390,26 @@ class FeedbackDecoder(nn.Module):
         # 5) Output velocity per action token
         pred_vel = self.vel_head(tgt_final)  # [B, 16, action_dim]
 
-        # Debug prints
-        print(f"obs: {obs.shape}, range [{obs.min().item()}, {obs.max().item()}]")
-        print(f"x (prepared): {x.shape}")
-        print(f"feat (DINOv2): {feat.shape}, range [{feat.min().item():.2f}, {feat.max().item():.2f}]")
-        print(f"obs_tokens: {obs_tokens_raw.shape}, spatial_tokens={N}")
-        print(
-            f"model_output_action: {model_output_action.shape}, range [{model_output_action.min().item():.2f}, {model_output_action.max().item():.2f}]"
-        )
-        print(f"memory: {memory.shape}, range [{memory.min().item():.2f}, {memory.max().item():.2f}]")
-        print(f"tgt (action features): {tgt.shape}, range [{tgt.min().item():.2f}, {tgt.max().item():.2f}]")
-        print(f"tgt2 (transformer output): {tgt2.shape}, range [{tgt2.min().item():.2f}, {tgt2.max().item():.2f}]")
-        print(
-            f"visual_gate: {self.visual_gate.item():.3f} (visual influence: {self.visual_gate.item() * 100:.1f}%)"
-        )
-        print(
-            f"tgt_final (tgt + gate*(tgt2-tgt)): {tgt_final.shape}, range [{tgt_final.min().item():.2f}, {tgt_final.max().item():.2f}]"
-        )
-        print(f"pred_vel: {pred_vel.shape}, range [{pred_vel.min().item():.2f}, {pred_vel.max().item():.2f}]")
+        # Debug prints (only when verbose=True)
+        if verbose:
+            print(f"x (prepared): {x.shape}")
+            print(f"feat (DINOv2): {feat.shape}, range [{feat.min().item():.2f}, {feat.max().item():.2f}]")
+            print(f"obs_tokens: {obs_tokens_raw.shape}, spatial_tokens={N}")
+            print(
+                f"model_output_action: {model_output_action.shape}, range [{model_output_action.min().item():.2f}, {model_output_action.max().item():.2f}]"
+            )
+            print(f"memory: {memory.shape}, range [{memory.min().item():.2f}, {memory.max().item():.2f}]")
+            print(f"tgt (action features): {tgt.shape}, range [{tgt.min().item():.2f}, {tgt.max().item():.2f}]")
+            print(
+                f"tgt2 (transformer output): {tgt2.shape}, range [{tgt2.min().item():.2f}, {tgt2.max().item():.2f}]"
+            )
+            print(
+                f"visual_gate: {self.visual_gate.item():.3f} (visual influence: {self.visual_gate.item() * 100:.1f}%)"
+            )
+            print(
+                f"tgt_final (tgt + gate*(tgt2-tgt)): {tgt_final.shape}, range [{tgt_final.min().item():.2f}, {tgt_final.max().item():.2f}]"
+            )
+            print(f"pred_vel: {pred_vel.shape}, range [{pred_vel.min().item():.2f}, {pred_vel.max().item():.2f}]")
 
         return pred_vel
 
@@ -451,16 +454,40 @@ class FeedbackAction(nn.Module):
         """
         Input: action_head_output: BatchFeature, time_step: int, action_input: BatchFeature
         Output: updated_actions: [B, 16, action_dim]
-        """
-        gt_actions = action_input.action  # ground truth action
-        final_model_output_action = action_head_output.final_model
-        final_raw_action = action_head_output.final_raw_action
-        dt = action_head_output.dt
 
-        pred_velocity = self.action_decoder_observe(
-            final_model_output_action, action_input.simple_img, action_input.embodiment_id
-        )
-        pred_actions = final_raw_action + dt * pred_velocity
+        Each of the 4 observations predicts 4 action steps:
+        - obs[0] (timestep N) -> actions 0:4
+        - obs[1] (timestep N+4) -> actions 4:8
+        - obs[2] (timestep N+8) -> actions 8:12
+        - obs[3] (timestep N+12) -> actions 12:16
+        """
+        gt_actions = action_input.action  # ground truth action [B, 16, action_dim]
+        final_model_output_action = action_head_output.final_model  # [B, 16, hidden_dim]
+        final_raw_action = action_head_output.final_raw_action  # [B, 16, action_dim]
+        dt = action_head_output.dt
+        observations = action_input.simple_img  # [B, V=1, T=4, H, W, C]
+
+        # Run action_decoder_observe 4 times, each with corresponding obs and 4 action tokens
+        pred_velocity_list = []
+        for i in range(4):
+            # Extract single observation frame from time dimension
+            # observations shape: [B, V=1, T=4, H, W, C]
+            obs_i = observations[:, :, i : i + 1, ...]  # [B, V=1, 1, H, W, C]
+
+            # Slice corresponding 4 action tokens
+            action_tokens_i = final_model_output_action[:, i * 4 : (i + 1) * 4, :]  # [B, 4, hidden_dim]
+
+            # Get velocity prediction for these 4 steps (verbose only on first iteration)
+            pred_vel_i = self.action_decoder_observe(
+                action_tokens_i, obs_i, action_input.embodiment_id, verbose=(i == 0)
+            )  # [B, 4, action_dim]
+            pred_velocity_list.append(pred_vel_i)
+
+        # Concatenate all 4 velocity predictions to get [B, 16, action_dim]
+        pred_velocity_all = torch.cat(pred_velocity_list, dim=1)  # [B, 16, action_dim]
+
+        # Calculate predicted actions
+        pred_actions = final_raw_action + dt * pred_velocity_all
 
         pred_actions_normalized = torch.tanh(pred_actions)  # normalize to match gt_actions
 
@@ -478,20 +505,43 @@ class FeedbackAction(nn.Module):
         """
         Process action prediction during inference, applying action_decoder_observe
         at the final step similar to training.
-        """
-        # Check if we have the final step information (from flow_matching_action_head)
 
+        Uses the same 4-observation pattern as training:
+        - obs[0] -> actions 0:4
+        - obs[1] -> actions 4:8
+        - obs[2] -> actions 8:12
+        - obs[3] -> actions 12:16
+        """
         print(f"@ feedback_action time_step: {time_step}")
         window_idx = time_step % 4
 
-        final_model_output_action = action_head_output.final_model
-        final_raw_action = action_head_output.final_raw_action
+        final_model_output_action = action_head_output.final_model  # [B, 16, hidden_dim]
+        final_raw_action = action_head_output.final_raw_action  # [B, 16, action_dim]
         dt = action_head_output.dt
-    
-        # Apply action_decoder_observe similar to training forward
-        pred_velocity = self.action_decoder_observe(
-            final_model_output_action, action_input.simple_img, action_input.embodiment_id
-        )
-        pred_actions = final_raw_action + dt * pred_velocity
+        observations = action_input.simple_img  # [B, V=1, T=4, H, W, C]
+
+        # Run action_decoder_observe 4 times, each with corresponding obs and 4 action tokens
+        pred_velocity_list = []
+        for i in range(4):
+            # Extract single observation frame from time dimension
+            # observations shape: [B, V=1, T=4, H, W, C]
+            obs_i = observations[:, :, i : i + 1, ...]  # [B, V=1, 1, H, W, C]
+
+            # Slice corresponding 4 action tokens
+            action_tokens_i = final_model_output_action[:, i * 4 : (i + 1) * 4, :]  # [B, 4, hidden_dim]
+
+            # Get velocity prediction for these 4 steps (verbose only on first iteration)
+            pred_vel_i = self.action_decoder_observe(
+                action_tokens_i, obs_i, action_input.embodiment_id, verbose=(i == 0)
+            )  # [B, 4, action_dim]
+            pred_velocity_list.append(pred_vel_i)
+
+        # Concatenate all 4 velocity predictions to get [B, 16, action_dim]
+        pred_velocity_all = torch.cat(pred_velocity_list, dim=1)  # [B, 16, action_dim]
+
+        # Calculate predicted actions
+        pred_actions = final_raw_action + dt * pred_velocity_all
+
+        # Select the window based on time_step
         pred_actions_window = pred_actions[:, window_idx * 4 : (window_idx + 1) * 4, :]
         return BatchFeature(data={"action_pred": pred_actions_window})
